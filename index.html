@@ -54,7 +54,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 <summary>Options</summary>
 <label class="check"><input type="checkbox" id="optBoss" checked> A step for each boss kill (wipes are left out)</label>
 <label class="check"><input type="checkbox" id="optStanding" checked> Only count mobs that stand in the raid, not ones summoned during a pull</label>
-<label class="check"><input type="checkbox" id="optSplit" checked> Split packs that were pulled back to back (a 20 second gap between kills counts as the next pack)</label>
+<label class="check"><input type="checkbox" id="optSplit" checked> Split packs that were pulled back to back (each kill is matched to the pack it spawned in, using where it died)</label>
 <label class="check"><input type="checkbox" id="optNumber"> Name each trash step "Pull 1", "Pull 2"...</label>
 </details>
 <div class="row" style="margin-top:14px"><button class="go" id="make">Make my route</button><span id="status" class="hint"></span></div>
@@ -151,16 +151,40 @@ var RouteCore = (function () {
   // Turns a report (+ its enemy deaths, when there are any) into one
   // route per raid. data = { report, deaths }, raidMobs = { raid: [names] }
   // opts: { bosses (true), standingOnly (true), numberPulls (false),
-  //         minKills (1), splitChains (true), splitGap (20000 ms) }
+  //         minKills (1), splitChains (true), splitGap (20000 ms),
+  //         packDistance (90 yards), overlapSlack (2000 ms) }
   // splitChains: Warcraft Logs only starts a new trash fight when the
   // raid leaves combat, so packs pulled back to back share one fight.
-  // A pause of splitGap or more between two kills inside one fight is
-  // taken as the next pack; those steps carry split = true.
-  function buildRoutes(data, raidMobs, opts) {
+  // With kill positions (data.kills) and the raid map's packs
+  // (raidPacks), every kill is matched to the spawn pack it came from and
+  // each pack becomes its own step, placed on the map (step.at). Without
+  // them, a pause of splitGap or more between two kills is taken as the
+  // next pack. Steps made by splitting carry split = true.
+  function buildRoutes(data, raidMobs, opts, raidPacks) {
     opts = opts || {};
     var bosses = opts.bosses !== false, standingOnly = opts.standingOnly !== false;
     var minKills = opts.minKills || 1;
     var splitChains = opts.splitChains !== false, splitGap = opts.splitGap || 20000;
+    var packDistance = opts.packDistance || 90;
+    var overlapSlack = opts.overlapSlack != null ? opts.overlapSlack : 2000;
+    var engageGap = opts.engageGap || 6000;
+    // when each enemy was pulled: the first debuff that landed on it
+    var engageOf = {};
+    (Array.isArray(data.engages) ? data.engages : []).forEach(function (ev) {
+      var key = ev.targetID + ":" + (ev.targetInstance || 0);
+      var t = ev.timestamp || 0;
+      (engageOf[key] || (engageOf[key] = [])).push(t);
+    });
+    Object.keys(engageOf).forEach(function (k) { engageOf[k].sort(function (a, b) { return a - b; }); });
+    // the first debuff on that unit inside the fight and before it died
+    function engageFor(ev, f) {
+      var list = engageOf[ev.targetID + ":" + (ev.targetInstance || 0)];
+      if (!list) return null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] >= f.startTime - 1000 && list[i] <= (ev.timestamp || 0)) return list[i];
+      }
+      return null;
+    }
     var report = data && data.report;
     if (!report || !Array.isArray(report.fights)) throw new Error("That is not a Warcraft Logs report - the fights are missing.");
     var actors = {};
@@ -174,6 +198,24 @@ var RouteCore = (function () {
     // deaths per fight, by name
     var deathsBy = {};
     var haveDeaths = Array.isArray(data.deaths) && data.deaths.length > 0;
+    // where each enemy took its killing hit, by unit (Warcraft Logs x/y
+    // are world y/-x in hundredths of a yard)
+    var posOf = {};
+    (Array.isArray(data.kills) ? data.kills : []).forEach(function (ev) {
+      if (typeof ev.x !== "number" || typeof ev.y !== "number") return;
+      var key = ev.targetID + ":" + (ev.targetInstance || 0);
+      (posOf[key] || (posOf[key] = [])).push({ t: ev.timestamp || 0, X: ev.y / 100, Y: -ev.x / 100 });
+    });
+    function placeOf(ev) {
+      var list = posOf[ev.targetID + ":" + (ev.targetInstance || 0)];
+      if (!list) return null;
+      var best = null, bd = 3001;
+      for (var i = 0; i < list.length; i++) {
+        var d = Math.abs(list[i].t - (ev.timestamp || 0));
+        if (d < bd) { bd = d; best = list[i]; }
+      }
+      return best;
+    }
     if (haveDeaths) {
       data.deaths.forEach(function (ev) {
         if (ev.type && ev.type !== "death") return;
@@ -186,7 +228,11 @@ var RouteCore = (function () {
           }
         }
         if (fid == null) return;
-        (deathsBy[fid] || (deathsBy[fid] = [])).push({ name: a.name, t: ev.timestamp || 0 });
+        var at = placeOf(ev);
+        var fobj = null;
+        for (var q = 0; q < fights.length; q++) if (fights[q].id === fid) { fobj = fights[q]; break; }
+        (deathsBy[fid] || (deathsBy[fid] = [])).push({ name: a.name, id: a.gameID, t: ev.timestamp || 0,
+          X: at ? at.X : null, Y: at ? at.Y : null, e: fobj ? engageFor(ev, fobj) : null });
       });
     }
 
@@ -199,16 +245,10 @@ var RouteCore = (function () {
         return;
       }
       if (f.encounterID) return;   // a boss from somewhere else
-      var counts = {}, groups = null;
+      var counts = {}, list = null;
       if (haveDeaths) {
-        var list = (deathsBy[f.id] || []).slice().sort(function (x, y) { return x.t - y.t; });
-        groups = [{}];
-        list.forEach(function (d, i) {
-          if (splitChains && i > 0 && d.t - list[i - 1].t >= splitGap) groups.push({});
-          var g = groups[groups.length - 1];
-          g[d.name] = (g[d.name] || 0) + 1;
-          counts[d.name] = (counts[d.name] || 0) + 1;
-        });
+        list = (deathsBy[f.id] || []).slice().sort(function (x, y) { return x.t - y.t; });
+        list.forEach(function (d) { counts[d.name] = (counts[d.name] || 0) + 1; });
       } else {
         (f.enemyNPCs || []).forEach(function (e) {
           var a = actors[e.id];
@@ -221,7 +261,7 @@ var RouteCore = (function () {
         if (r) votes[r] = (votes[r] || 0) + counts[n];
       });
       Object.keys(votes).forEach(function (r) { if (!best || votes[r] > votes[best]) best = r; });
-      rows.push({ fight: f, raid: best, counts: counts, groups: groups });
+      rows.push({ fight: f, raid: best, counts: counts, list: list });
     });
     // trash that named no raid takes the raid of the boss after it, else before it
     rows.forEach(function (row, i) {
@@ -229,6 +269,169 @@ var RouteCore = (function () {
       for (var j = i + 1; j < rows.length; j++) if (rows[j].boss) { row.raid = rows[j].raid; return; }
       for (var k = i - 1; k >= 0; k--) if (rows[k].raid) { row.raid = rows[k].raid; return; }
     });
+
+    // ---- each kill to the spawn pack it came from, per raid, in time order
+    var packIndex = {};
+    function indexFor(raid) {
+      if (packIndex[raid] !== undefined) return packIndex[raid];
+      var R = raidPacks && raidPacks[raid];
+      if (!R || !Array.isArray(R.packs)) return (packIndex[raid] = null);
+      var altOf = {};
+      Object.keys(R.alts || {}).forEach(function (k) {
+        (R.alts[k] || []).forEach(function (m) { altOf[m] = R.alts[k]; });
+      });
+      var byId = {}, cap = [];
+      R.packs.forEach(function (p, pi) {
+        cap[pi] = {};
+        for (var k = 4; k + 1 < p.length; k += 2) {
+          var id = p[k], n = p[k + 1];
+          if (typeof id !== "number") continue;
+          var ids = altOf[id] || [id];
+          ids.forEach(function (m) { (byId[m] || (byId[m] = [])).indexOf(pi) < 0 && byId[m].push(pi); });
+          var key = String(ids[0]);
+          cap[pi][key] = (cap[pi][key] || 0) + n;
+        }
+      });
+      return (packIndex[raid] = { packs: R.packs, byId: byId, cap: cap, altOf: altOf });
+    }
+    var assigned = 0, placed = 0;
+    RAID_ORDER.forEach(function (raid) {
+      var I = splitChains && indexFor(raid);
+      if (!I) return;
+      var all = [];
+      rows.forEach(function (row) {
+        if (row.raid === raid && !row.boss && row.list) row.list.forEach(function (d) { all.push(d); });
+      });
+      all.sort(function (a, b) { return a.t - b.t; });
+      all.forEach(function (d) {
+        if (d.X == null) return;
+        placed++;
+        var cands = I.byId[d.id];
+        if (!cands) return;
+        var key = String((I.altOf[d.id] || [d.id])[0]);
+        var best = -1, bd = packDistance, bestAny = -1, bdAny = packDistance;
+        cands.forEach(function (pi) {
+          var p = I.packs[pi], dist = Math.sqrt((p[1] - d.X) * (p[1] - d.X) + (p[2] - d.Y) * (p[2] - d.Y));
+          if (dist < bdAny) { bdAny = dist; bestAny = pi; }
+          if ((I.cap[pi][key] || 0) > 0 && dist < bd) { bd = dist; best = pi; }
+        });
+        var pick = best >= 0 ? best : bestAny;
+        if (pick < 0) return;
+        if (best >= 0) I.cap[pick][key]--;
+        d.pack = pick;
+        assigned++;
+      });
+    });
+
+    // ---- the pulls of one trash fight, from when each mob was pulled.
+    // Mobs pulled within engageGap of each other are one pull; mobs of
+    // the same spawn pack always stay in one pull; mobs with no pull
+    // time go with their pack, else the pull that was alive when they died.
+    function pullsOf(row, I) {
+      var list = row.list;
+      var timed = list.filter(function (d) { return d.e != null; }).sort(function (a, b) { return a.e - b.e; });
+      var pulls = [];
+      timed.forEach(function (d) {
+        var cur = pulls[pulls.length - 1];
+        if (!cur || d.e - cur.lastE > engageGap) { cur = { mobs: [], firstE: d.e, lastE: d.e, packs: {} }; pulls.push(cur); }
+        cur.mobs.push(d);
+        cur.lastE = d.e;
+        if (d.pack != null) cur.packs[d.pack] = true;
+      });
+      // one spawn pack split over two pulls (a mob that ran in late): join them
+      for (var i = 0; i < pulls.length; i++) {
+        for (var j = i + 1; j < pulls.length; j++) {
+          var share = Object.keys(pulls[j].packs).some(function (pk) { return pulls[i].packs[pk]; });
+          if (share) {
+            pulls[i].mobs = pulls[i].mobs.concat(pulls[j].mobs);
+            Object.keys(pulls[j].packs).forEach(function (pk) { pulls[i].packs[pk] = true; });
+            if (pulls[j].lastE > pulls[i].lastE) pulls[i].lastE = pulls[j].lastE;
+            pulls.splice(j, 1);
+            j = i;
+          }
+        }
+      }
+      pulls.forEach(function (p) { p.lastT = Math.max.apply(null, p.mobs.map(function (d) { return d.t; })); });
+      list.forEach(function (d) {
+        if (d.e != null) return;
+        var home = null;
+        if (d.pack != null) pulls.forEach(function (p) { if (!home && p.packs[d.pack]) home = p; });
+        if (!home) pulls.forEach(function (p) { if (!home && d.t >= p.firstE && d.t <= p.lastT + 3000) home = p; });
+        if (!home) {
+          var bt = Infinity;
+          pulls.forEach(function (p) { var dt = Math.abs(p.lastT - d.t); if (dt < bt) { bt = dt; home = p; } });
+        }
+        if (home) home.mobs.push(d);
+      });
+      pulls.sort(function (a, b) { return a.firstE - b.firstE; });
+      return pulls.map(function (p) {
+        var counts = {}, byPack = {}, best = null;
+        p.mobs.forEach(function (d) {
+          counts[d.name] = (counts[d.name] || 0) + 1;
+          if (d.pack != null) {
+            byPack[d.pack] = (byPack[d.pack] || 0) + 1;
+            if (best == null || byPack[d.pack] > byPack[best]) best = d.pack;
+          }
+        });
+        return { counts: counts, pack: (I && best != null) ? I.packs[best] : null };
+      });
+    }
+
+    // ---- the steps of one trash fight: one per pack, else the gap rule
+    function groupsOf(row) {
+      if (!row.list) return [{ counts: row.counts }];
+      var I = splitChains && indexFor(row.raid);
+      var list = row.list;
+      if (splitChains && list.some(function (d) { return d.e != null; })) return pullsOf(row, I);
+      if (I && list.some(function (d) { return d.pack != null; })) {
+        // kills that matched no pack (summoned adds, strays) go with the
+        // nearest kill in time that did
+        list.forEach(function (d, i) {
+          if (d.pack != null) return;
+          var bestJ = -1, bt = Infinity;
+          for (var j = 0; j < list.length; j++) {
+            if (list[j].pack == null || list[j]._loose) continue;
+            var dt = Math.abs(list[j].t - d.t);
+            if (dt < bt) { bt = dt; bestJ = j; }
+          }
+          if (bestJ >= 0) { d.pack = list[bestJ].pack; d._loose = true; }
+        });
+        var byPack = {}, order = [];
+        list.forEach(function (d) {
+          var g = byPack[d.pack];
+          if (!g) { g = byPack[d.pack] = { counts: {}, first: d.t, last: d.t, n: 0, pack: I.packs[d.pack] }; order.push(g); }
+          g.counts[d.name] = (g.counts[d.name] || 0) + 1;
+          g.last = d.t;
+          g.n++;
+        });
+        list.forEach(function (d) { delete d._loose; });
+        order.sort(function (a, b) { return a.first - b.first; });
+        // packs whose kills overlap in time were pulled together: one step.
+        // Only a pack that starts dying after the one before it is done is
+        // a pack of its own.
+        var merged = [];
+        order.forEach(function (g) {
+          var cur = merged[merged.length - 1];
+          if (cur && g.first <= cur.last + overlapSlack) {
+            Object.keys(g.counts).forEach(function (n) { cur.counts[n] = (cur.counts[n] || 0) + g.counts[n]; });
+            if (g.last > cur.last) cur.last = g.last;
+            if (g.n > cur.bigN) { cur.bigN = g.n; cur.pack = g.pack; }
+            cur.n += g.n;
+          } else {
+            g.bigN = g.n;
+            merged.push(g);
+          }
+        });
+        return merged;
+      }
+      var groups = [{ counts: {} }];
+      list.forEach(function (d, i) {
+        if (splitChains && i > 0 && d.t - list[i - 1].t >= splitGap) groups.push({ counts: {} });
+        var g = groups[groups.length - 1].counts;
+        g[d.name] = (g[d.name] || 0) + 1;
+      });
+      return groups;
+    }
 
     var byRaid = {};
     var pullNo = {};
@@ -246,7 +449,8 @@ var RouteCore = (function () {
         return;
       }
       var made = [];
-      (row.groups || [row.counts]).forEach(function (counts) {
+      groupsOf(row).forEach(function (grp) {
+        var counts = grp.counts;
         var mobs = [];
         Object.keys(counts).forEach(function (n) {
           if (standingOnly && raidOfName[n.toLowerCase()] !== row.raid) return;
@@ -255,11 +459,12 @@ var RouteCore = (function () {
         var total = mobs.reduce(function (t, m) { return t + m.kills; }, 0);
         if (total < minKills || mobs.length === 0) return;
         mobs.sort(function (a, b) { return b.kills - a.kills || (a.mob < b.mob ? -1 : 1); });
-        made.push({ mobs: mobs, total: total });
+        made.push({ mobs: mobs, total: total, pack: grp.pack });
       });
       made.forEach(function (m) {
         pullNo[row.raid] = (pullNo[row.raid] || 0) + 1;
         var step = { type: "kills", mobs: m.mobs, desc: opts.numberPulls ? ("Pull " + pullNo[row.raid]) : "", actions: {} };
+        if (m.pack) step.at = { f: m.pack[0], x: m.pack[1], y: m.pack[2] };
         out.steps.push(step);
         if (made.length > 1) { out.split = (out.split || 0) + 1; out.splitSteps = out.splitSteps || []; out.splitSteps.push(step); }
         out.kills += m.total;
@@ -268,13 +473,15 @@ var RouteCore = (function () {
       if (made.length > 1) out.chains = (out.chains || 0) + 1;
     });
 
-    return RAID_ORDER.filter(function (r) { return byRaid[r] && byRaid[r].steps.length > 0; })
+    var result = RAID_ORDER.filter(function (r) { return byRaid[r] && byRaid[r].steps.length > 0; })
       .map(function (r) {
         var o = byRaid[r];
         o.text = "WRROUTE1\n" + r + "\n" + toLua({ fromLogs: true, source: (report.title || "Warcraft Logs"), steps: o.steps });
         (o.splitSteps || []).forEach(function (st) { st.split = true; });
         return o;
       });
+    result.positions = { kills: placed, matched: assigned };
+    return result;
   }
 
   // A value as a Lua table literal, the way Readycheck writes its own
@@ -342,6 +549,9 @@ var RouteCore = (function () {
 if (typeof module !== "undefined") module.exports = RouteCore;
 
 var RAID_MOBS = {"Naxxramas":["Bile Retcher","Bony Construct","Carrion Spinner","Crypt Guard","Crypt Reaver","Dark Touched Warrior","Death Lord","Death Touched Warrior","Deathknight","Deathknight Captain","Deathknight Cavalier","Deathknight Understudy","Deathknight Vindicator","Diseased Maggot","Doom Touched Warrior","Dread Creeper","Embalming Slime","Eye Stalk","Frenzied Bat","Infectious Ghoul","Infectious Skitterer","Living Monstrosity","Mad Scientist","Mutated Grub","Naxxramas Acolyte","Naxxramas Cultist","Naxxramas Follower","Naxxramas Worshipper","Necro Knight","Necro Knight Guardian","Necro Stalker","Necropolis Acolyte","Patchwork Golem","Plague Beast","Plague Slime","Plagued Bat","Plagued Deathhound","Plagued Gargoyle","Plagued Ghoul","Risen Deathknight","Rotting Maggot","Shade of Naxxramas","Skeletal Smith","Skeletal Steed","Sludge Belcher","Spirit of Naxxramas","Stitched Spewer","Stoneskin Gargoyle","Surgical Assistant","Tomb Horror","Unholy Axe","Unholy Staff","Unholy Swords","Venom Stalker"],"Blackwing Lair":["Blackwing Guardsman","Blackwing Spellbinder","Blackwing Taskmaster","Blackwing Technician","Blackwing Warlock","Corrupted Blue Whelp","Corrupted Bronze Whelp","Corrupted Green Whelp","Corrupted Red Whelp","Death Talon Captain","Death Talon Flamescale","Death Talon Hatcher","Death Talon Overseer","Death Talon Seether","Death Talon Wyrmguard","Death Talon Wyrmkin","Grethok the Controller","Master Elemental Shaper Krixix"],"Molten Core":["Ancient Core Hound","Core Hound","Core Rager","Firelord","Firesworn","Firewalker","Flame Imp","Flameguard","Flamewaker","Flamewaker Priest","Flamewaker Protector","Lava Annihilator","Lava Elemental","Lava Reaver","Lava Surger","Molten Destroyer","Molten Giant"],"Temple of Ahn'Qiraj":["Anubisath Defender","Anubisath Sentinel","Anubisath Warder","Obsidian Eradicator","Obsidian Nullifier","Ouro Spawner","Qiraji Brainwasher","Qiraji Champion","Qiraji Lasher","Qiraji Mindslayer","Qiraji Scarab","Qiraji Scorpion","Qiraji Slayer","Sartura's Royal Guard","Vekniss Drone","Vekniss Guardian","Vekniss Hive Crawler","Vekniss Soldier","Vekniss Stinger","Vekniss Warrior","Vekniss Wasp"]};
+// Every pack in the four raids, from the addon's raid map:
+// raid -> { packs: [[floor, x, y, boss or 0, npc id, count, ...]], alts }
+var RAID_PACKS = {"Blackwing Lair":{"packs":[[1,-7533.4,-905.3,0,12464,1,12465,1],[1,-7517.5,-912.8,0,12465,1],[1,-7537.6,-921,0,12463,1,12467,1],[1,-7522.1,-924.4,0,12463,1],[1,-7475.1,-1001,0,13996,2],[1,-7483.8,-1016,"Vaelastrasz the Corrupt",13996,4,13020,1],[1,-7617.1,-1023.6,0,14456,2,12557,1],[1,-7571.7,-1088.2,"Razorgore the Untamed",12435,1],[2,-7583.9,-930.6,0,12464,2,12465,2,12463,1,12467,1],[2,-7634.9,-956,0,14025,1],[2,-7638.7,-964.2,0,12468,1,14022,1,14023,1,14024,1,14025,1],[2,-7631.2,-971.9,0,14024,1],[2,-7530,-972.9,0,13996,10,12459,2,12457,1,12461,1],[2,-7656.9,-975.1,0,14022,1],[2,-7622.6,-978.5,0,14022,1],[2,-7659.8,-979.3,0,14024,1],[2,-7633.7,-980.5,0,14025,1],[2,-7652,-981.7,0,14024,1],[2,-7659.7,-986.5,0,14022,1,14025,1],[2,-7668.8,-986.8,0,14023,2,12468,1,14022,1,14024,1,14025,1],[2,-7627.4,-988.6,0,14025,1],[2,-7640.8,-988.8,0,14023,2],[2,-7594.9,-989.1,0,12458,3],[2,-7618.2,-989.4,0,14024,1],[2,-7688.9,-990.7,0,14024,1],[2,-7652.4,-992.2,0,14022,1],[2,-7683.3,-993,0,14023,1,14025,1],[2,-7659.1,-995.7,0,14024,1],[2,-7643.3,-997.2,0,14022,1],[2,-7680,-998.4,0,14022,1,14024,1],[2,-7620.5,-998.4,0,12468,1],[2,-7645.3,-1001.9,0,14022,1],[2,-7669,-1002.6,0,14025,1],[2,-7630.1,-1003.5,0,14025,2,14022,1,14023,1],[2,-7695.3,-1005.5,0,12468,1],[2,-7681.3,-1007.7,0,14022,1],[2,-7627.3,-1009.3,0,14024,1],[2,-7665.7,-1009.9,0,14023,1],[2,-7673.2,-1010,0,14023,1],[2,-7653.9,-1010.1,0,14024,1],[2,-7686.6,-1012.4,0,14024,1],[2,-7548.1,-1015,0,13996,3,12459,1],[2,-7695.5,-1015.1,0,14022,1,14023,1],[2,-7639,-1015.6,0,14025,3,14022,2,14024,2,14023,1],[2,-7660,-1016.2,0,14025,1],[2,-7602.6,-1016.5,0,14024,1],[2,-7702.4,-1017,0,14024,1,14025,1],[2,-7678.4,-1018,0,14024,1],[2,-7670.2,-1018.5,0,14022,1],[2,-7597.3,-1019.2,0,14025,1],[2,-7606.5,-1020.9,0,14024,1],[2,-7648.2,-1022.5,0,12468,1,14022,1,14023,1],[2,-7694.3,-1023.9,0,14023,1],[2,-7600.7,-1025.3,0,14022,1],[2,-7686.8,-1026.6,0,14023,1,14025,1],[2,-7674.3,-1026.8,0,14023,1],[2,-7695.4,-1029.2,0,14022,1],[2,-7602.9,-1031.5,0,14023,1],[2,-7630.2,-1033.7,0,14024,1],[2,-7624.2,-1033.9,0,12468,1,14022,1,14023,1,14025,1],[2,-7694.1,-1034.3,0,14024,1],[2,-7573.9,-1035.2,"Broodlord Lashlayer",12017,1],[2,-7685.9,-1036.2,0,14023,1],[2,-7666,-1037,0,14023,1],[2,-7618.4,-1038.3,0,14022,1],[2,-7658.3,-1039.6,0,14024,1,14025,1],[2,-7550,-1041,0,13996,3,12459,1],[2,-7671.6,-1041,0,14022,2,12468,1,14023,1],[2,-7682.5,-1041.2,0,14025,1],[2,-7607.4,-1041.7,0,14024,1],[2,-7616,-1044,0,14024,1],[2,-7689.3,-1046.2,0,14025,2],[2,-7624.9,-1046.6,0,14023,1],[2,-7683.5,-1047.3,0,14024,1],[2,-7619.8,-1047.6,0,14022,1],[2,-7630.9,-1049.9,0,14024,1],[2,-7511.4,-1049.9,0,13996,9,12459,2,12457,1,12461,1],[2,-7601.6,-1050.8,0,14022,1],[2,-7625.1,-1051.8,0,14025,1],[2,-7652.4,-1052.2,0,14024,1],[2,-7609.7,-1054.5,0,14025,1],[2,-7695.1,-1055.4,0,14023,1],[2,-7702.8,-1057,0,14022,1,14024,1],[2,-7649,-1057.8,0,12468,1,14025,1],[2,-7618.1,-1059.9,0,14023,1],[2,-7633.5,-1062,0,14022,1],[2,-7710.2,-1064,0,12458,3,14023,1,14024,1,14025,1],[2,-7573.1,-1066.1,0,14022,2,14023,1,14024,1,14025,1],[2,-7610.7,-1066.9,0,14024,1,14025,1],[2,-7597.6,-1067.4,0,14022,1],[2,-7719.5,-1067.5,0,14023,1],[2,-7621.8,-1068.8,0,14023,1],[2,-7647.1,-1069,0,14023,1],[2,-7657.1,-1069,0,14022,1,14023,1],[2,-7630,-1069.4,0,14023,1],[2,-7598.7,-1072.5,0,14022,1],[2,-7642.8,-1075.9,0,14025,1],[2,-7711.3,-1076.2,0,12458,3,14022,2,14025,2,14023,1,14024,1],[2,-7622,-1077.2,0,14025,1],[2,-7592.6,-1077.5,0,12468,1,14024,1],[2,-7636,-1078.2,0,14025,1],[2,-7605.2,-1080.3,0,14025,1],[2,-7662.2,-1080.3,0,14024,1],[2,-7671.5,-1082.7,0,14025,1],[2,-7594.8,-1086.2,0,14023,1],[2,-7646.8,-1086.4,0,14024,1],[2,-7659.6,-1087,0,14024,1],[2,-7635,-1087.5,0,14024,1],[2,-7681.6,-1087.5,0,14023,1],[2,-7705.6,-1089,0,14022,1],[2,-7699.4,-1090.7,0,14025,1],[2,-7653.1,-1092.7,0,14022,1],[2,-7647.5,-1093.8,0,14022,1],[2,-7693.3,-1094.9,0,14022,1],[2,-7683.7,-1096.4,0,14025,1],[2,-7655.5,-1100.2,0,12468,1],[2,-7670.3,-1100.3,0,14024,1],[2,-7693.2,-1100.7,0,14024,1],[2,-7641,-1100.7,0,14022,1,14023,1,14025,1],[2,-7631.5,-1102.1,0,12468,1,14024,1],[2,-7657.6,-1104.8,0,14025,1],[2,-7683.1,-1108.7,0,14023,1],[2,-7644.2,-1110.2,0,14025,1],[2,-7669.7,-1112.4,0,14023,1],[2,-7654.6,-1113.2,0,14022,1],[2,-7690.9,-1114,0,14024,1,14025,1],[2,-7659.7,-1118.7,0,14024,1],[2,-7684.4,-1122.9,0,14023,1],[2,-7678.3,-1123.5,0,14022,1],[2,-7678.9,-1129.2,0,14025,1],[3,-7460,-867.1,0,13996,7,12459,1,12461,1],[3,-7487,-881.9,0,13996,3,12457,1,12459,1],[3,-7407.8,-916.9,0,13996,9,12457,2,12459,2,12461,1],[3,-7518,-920.8,0,13996,10,12459,2,12457,1,12461,1],[3,-7433.4,-923.8,"Firemaw",11983,1],[3,-7457.3,-940.8,0,13996,6,12457,1,12459,1,12461,1],[3,-7397.1,-962.2,0,12460,3,14401,1],[3,-7440,-964.7,0,13996,3,12457,1,12459,1],[3,-7465,-991.2,0,12461,3,12460,1],[3,-7358.2,-994.3,"Ebonroc",14601,1],[3,-7515.3,-1029.6,"Chromaggus",14020,1],[3,-7407.9,-1031,"Flamegor",11981,1],[3,-7450.4,-1033,0,12460,1],[3,-7446.9,-1044.8,0,12460,1],[3,-7435.9,-1052.2,0,12460,1],[4,-7588.3,-1261.9,"Nefarian",10162,1]],"alts":{}},"Molten Core":{"packs":[[1,729.6,-485.5,0,11673,1],[1,679.8,-498,"Garr",12099,8,12057,1],[1,760.4,-499.9,0,11659,1],[1,746.8,-503.6,0,11665,1],[1,768.7,-512.4,0,11659,1],[1,761.5,-531.8,0,11665,1],[1,669.2,-532.1,0,11673,1],[1,1135.2,-536,0,11658,1],[1,898.1,-545.9,"Gehennas",11661,2,12259,1],[1,1123.9,-546.3,0,11658,1],[1,798.7,-547.5,0,11658,1],[1,838.1,-547.9,0,11665,1],[1,875,-550.3,0,11665,1],[1,680.6,-553.1,0,11659,1],[1,787.1,-553.2,0,11659,1],[1,701.5,-553.7,0,11665,1],[1,857.5,-555.6,0,11665,1],[1,1156.4,-557.7,0,11665,1],[1,1172.5,-561.8,0,11658,1],[1,1140.4,-570.3,0,11665,1],[1,695.6,-570.8,0,11659,1],[1,968,-572.9,0,11658,1],[1,858,-573.7,0,11659,1],[1,1172,-575.5,0,11658,1],[1,766.7,-576.6,0,11665,1],[1,957.5,-580.8,0,11658,1],[1,1140,-583.3,0,11665,1],[1,782,-585,0,11665,1],[1,862.1,-589.3,0,11658,1],[1,711.9,-591.8,0,11673,1],[1,851.2,-601.5,0,11665,1],[1,708.1,-604,0,11673,1],[1,815.1,-604.3,0,11658,1,11659,1],[1,1197.7,-618.9,0,11665,1],[1,989.7,-625.5,0,12101,1],[1,862.9,-627.3,0,11665,1],[1,896.7,-631,0,11665,1],[1,1205.3,-633.1,0,11665,1],[1,796,-639.7,0,11673,1],[1,829.7,-639.8,0,11665,1],[1,1143,-645,0,11673,1],[1,961.9,-646.3,0,11659,1],[1,813.2,-646.4,0,11673,1],[1,1092.8,-648.3,0,11665,1],[1,955.1,-656.8,0,11658,1],[1,1187,-657.1,0,11665,1],[1,1160.4,-657.9,0,11665,1],[1,805.4,-659.1,0,12101,1],[1,691.6,-662.6,0,12101,1],[1,970.1,-662.6,0,11665,1],[1,1039.6,-666.5,0,12101,1],[1,1100,-669.2,0,11665,1],[1,985,-674.4,0,11665,1],[1,766.6,-685.1,0,12101,1],[1,1040.6,-704.7,0,11659,1],[1,1047.2,-718.9,0,11658,1],[1,654.3,-751.6,0,12076,2,11666,1,11667,1],[1,1016.8,-751.8,0,11665,1],[1,1151,-764.3,0,11665,1],[1,1069.8,-766.1,0,11658,1],[1,603.5,-770.9,0,11666,1,11667,1,12100,1],[1,1082,-772.8,0,11658,1],[1,1128.5,-777,0,11665,1],[1,576.7,-777.4,0,11673,1],[1,639.2,-792.7,0,12076,2,11666,1,11667,1],[1,583.5,-799.8,"Shazzrah",12264,1],[1,1056.5,-801.5,0,11665,1],[1,1014,-807.3,0,12101,1],[1,678.2,-810,0,11666,1,11667,1,12100,1],[1,1039,-817.5,0,11673,1],[1,889.1,-823,0,12101,1],[1,838.5,-829.8,"Ragnaros"],[1,690,-843.6,0,11665,1],[1,599.4,-852.9,0,12076,2,11666,1,11667,1],[1,652.4,-860.3,0,11666,1,11667,1,12100,1],[1,1054.7,-861.7,0,11669,10,12101,1],[1,1009.2,-863.9,0,12101,1],[1,708.4,-868.7,0,11666,1,11667,1,12100,1],[1,964.3,-889.5,0,11669,10,12101,1],[1,722.6,-889.5,0,11665,1],[1,1066,-895,0,11669,10],[1,1038.5,-895.5,0,11669,20],[1,730,-916,0,11666,1,11667,1,12100,1],[1,709.8,-932.3,0,11673,1],[1,721.2,-945.1,0,11665,1],[1,1000.2,-955.4,"Lucifron",11671,5,12119,2,12118,1],[1,1035.4,-962.4,0,11671,5],[1,1081.5,-972.6,0,11671,4],[1,814.4,-973.5,0,11673,1],[1,785.6,-974.3,0,11672,1],[1,1066.7,-974.6,0,11671,1],[1,747.5,-981.7,"Baron Geddon",12056,1],[1,847.5,-984.1,0,11666,1,11667,1,12100,1],[1,887.2,-987.5,0,12076,2,11666,1,11667,1],[1,1111.1,-990.2,0,11671,4],[1,746.8,-997.9,0,11673,1],[1,793.2,-998.3,"Golemagg the Incinerator",11988,1],[1,1126.8,-999.5,0,11671,1],[1,1085.2,-1010.2,0,11671,1],[1,783.4,-1017.1,0,11672,1],[1,1074.4,-1017.5,0,11671,1],[1,1144.6,-1020.5,"Magmadar",11982,1],[1,1097.8,-1022.6,0,11671,2],[1,836.9,-1024.2,0,11665,1],[1,1082.9,-1026.8,0,11671,1],[1,900.5,-1029.9,0,11665,1],[1,855.9,-1030.1,0,11665,1],[1,739.6,-1035.8,0,12076,2,11666,1,11667,1],[1,638.3,-1047.2,0,11665,1],[1,659.6,-1071.1,0,11673,1],[1,677,-1085.6,0,11666,1,12076,1],[1,663.4,-1097,0,11667,1,12076,1],[1,598,-1109.6,0,12076,2,11666,1,11667,1],[1,692.2,-1115.8,0,11665,1],[1,640,-1131.1,0,11665,1],[1,664.4,-1149.9,0,11665,1],[1,607.7,-1160.5,0,11673,1],[1,758.1,-1176.7,"Majordomo Executus"],[1,601.1,-1179.1,"Sulfuron Harbinger",11662,4,12098,1],[1,608.5,-1193,0,12101,1],[1,705.4,-1198,0,11673,1],[1,758,-1227.5,0,12101,1]],"alts":{"11665":[11665,11668]}},"Naxxramas":{"packs":[[1,3285.3,-3446.6,0,16573,1],[1,3316.5,-3476.2,"Anub'Rekhan",15956,1],[1,3186.4,-3477.2,0,15977,10,15975,3,15974,2,15976,1],[1,3113.1,-3492.8,0,15977,10],[1,3291.3,-3502.1,0,16573,1],[1,3452.4,-3503.1,0,16453,2],[1,3453.5,-3530.7,0,16449,1],[1,3426.8,-3535.2,0,16447,4],[1,3146.8,-3535.7,0,15975,3,15974,2,15976,1],[1,3068.3,-3540.9,0,15975,3,15974,2,15976,1],[1,3453.5,-3559,0,16448,1],[1,3175.3,-3563.3,0,15976,1],[1,3446.4,-3572.8,0,16448,1],[1,3104.8,-3573.4,0,15977,10],[1,3213.8,-3573.8,0,15975,1],[1,3463.1,-3575.4,0,16448,1],[1,3154.3,-3581.4,0,15977,10],[1,3215.1,-3585.8,0,15975,1],[1,3202.9,-3587.7,0,15975,3,15978,2],[1,3442,-3590.6,0,16368,1],[1,3465.3,-3590.9,0,16368,1],[1,3430.2,-3608.2,0,16446,2],[1,3353.2,-3620.1,"Grand Widow Faerlina",16506,4,16505,2,15953,1],[1,3463.6,-3620.3,0,16446,2],[1,3146.9,-3628.4,0,15975,1],[1,3183,-3640.7,0,15975,1],[1,3162,-3642.2,0,15975,1],[1,3179,-3647.5,0,15975,2,15978,2,15976,1],[1,3370.6,-3648.7,0,15980,4,15981,4],[1,3334.8,-3648.8,0,15980,5,15981,3],[1,3467.9,-3654.3,0,16446,1],[1,3449.1,-3660.2,0,16446,1],[1,3376.6,-3669.8,0,15981,5,15980,3],[1,3441.7,-3678.2,0,16368,1],[1,3336.1,-3678.6,0,15980,9,15981,7],[1,3466,-3678.8,0,16368,1],[1,3453.4,-3689.7,0,16448,1],[1,3254.2,-3689.9,0,15976,1],[1,3383.6,-3692.4,0,15977,10,15980,5,15981,3],[1,3277.6,-3700.9,0,15977,10],[1,3460.1,-3703.5,0,16448,1],[1,3446.3,-3705.1,0,16448,1],[1,3220.7,-3727.5,0,15976,1],[1,3453.5,-3739.2,0,16449,1],[1,3215.7,-3742.4,0,16453,2],[1,3476.4,-3753.2,0,16447,4],[1,3429.5,-3763.9,0,16448,3],[1,3401.8,-3774.6,0,16368,1],[1,3232.1,-3779.1,0,16453,2],[1,3140.9,-3783.1,0,15974,4,15979,1],[1,3419,-3791.6,0,16368,1],[1,3221.7,-3798.6,0,15974,4,15979,1],[1,3344.1,-3831.2,0,16368,1],[1,3361.6,-3847.9,0,16368,1],[1,3249.2,-3871,0,16368,1],[1,3310,-3882.3,0,16449,1],[1,3283.8,-3884.9,0,16447,4],[1,3249.4,-3895.5,0,16368,1],[1,3503,-3919.2,"Maexxna",15952,1],[2,2794.5,-3397.4,0,16145,2,16165,2],[2,2866.6,-3472.7,0,16168,1],[2,2840.6,-3479.6,0,16168,1],[2,2892.8,-3481.9,0,16244,3,16243,2],[2,2808.6,-3482.1,0,16168,1],[2,2777.8,-3482.4,0,16168,1],[2,2678,-3485.1,"Noth the Plaguebringer",15954,1],[2,2733.1,-3490.6,0,16168,1],[2,2809.1,-3497.4,0,16168,1],[2,2777.7,-3497.6,0,16168,1],[2,2840.7,-3499.9,0,16168,1],[2,2556.7,-3500.7,0,16452,2,16451,1],[2,2933.9,-3518.7,0,16244,3,16243,2],[2,2530,-3526.8,0,16447,4],[2,2581.9,-3527.3,0,16447,4],[2,2556.4,-3528.9,0,16449,1],[2,2765,-3540.8,0,16036,1],[2,2827.7,-3545.2,0,16036,1],[2,2872.1,-3549.5,0,16244,3,16243,2],[2,2798.3,-3550.8,0,16036,1],[2,2773.9,-3553.9,0,16036,1],[2,2753.1,-3554.8,0,16036,1],[2,2833.9,-3555.9,0,16037,1],[2,2556.6,-3559.2,0,16448,1],[2,2796.7,-3566.9,0,16036,1],[2,2773.7,-3570.1,0,16037,1],[2,2678.7,-3570.5,0,16297,1],[2,2548.4,-3571.6,0,16448,1],[2,2565.1,-3571.8,0,16448,1],[2,2705.7,-3572,0,16037,1],[2,2846.8,-3576,0,16037,1],[2,2719,-3576.2,0,16036,1],[2,2815.4,-3578.1,0,16036,1,16037,1],[2,2761,-3578.2,0,16037,2,16034,1,16297,1],[2,2910.2,-3581.5,0,16037,1],[2,2895.2,-3581.7,0,16036,1],[2,2694.1,-3582.5,0,16036,1,16297,1],[2,2877.3,-3583.5,0,16297,1],[2,2785.1,-3584.6,0,16297,1],[2,2836.1,-3587.9,0,16036,1,16297,1],[2,2544.9,-3590.7,0,16368,1],[2,2567.6,-3591,0,16368,1],[2,2861.9,-3591.1,0,16036,1,16037,1],[2,2804.6,-3591.2,0,16037,1],[2,2887.8,-3591.8,0,16037,1],[2,2751.8,-3595,0,16036,1,16037,1],[2,2677.9,-3596.3,0,16037,1],[2,2908.2,-3598.8,0,16037,1],[2,2696.8,-3599.2,0,16037,1],[2,2811.5,-3601.5,0,16037,1],[2,2732.6,-3601.8,0,16036,1,16037,1,16297,1],[2,2659.5,-3605.9,0,16036,1],[2,2843.7,-3606.1,0,16034,1,16036,1,16037,1,16297,1],[2,2714.2,-3606.2,0,16034,1,16036,1,16037,1,16297,1],[2,2884.5,-3608.4,0,16036,1,16037,1,16297,1],[2,2766.4,-3610.8,0,16037,1],[2,2819.9,-3611.1,0,16036,1],[2,2684.8,-3611.4,0,16036,1,16037,1],[2,2536.3,-3612.5,0,16446,2],[2,2750.5,-3613.7,0,16037,1],[2,2799.5,-3616.4,0,16036,2],[2,2903.5,-3623.2,0,16036,1],[2,2696.6,-3624.9,0,16036,1],[2,2826,-3625.8,0,16036,1],[2,2672.4,-3626,0,16036,1],[2,2572.9,-3627.7,0,16446,2],[2,2852.6,-3627.8,0,16036,2],[2,2887.2,-3633.7,0,16037,1],[2,2869.1,-3643.1,0,16037,1],[2,2910.6,-3645.1,0,16036,1],[2,2893.4,-3653.7,0,16037,1],[2,2856.5,-3653.8,0,16037,1],[2,2572.7,-3654.7,0,16446,1],[2,2551.2,-3658.9,0,16446,1],[2,2915.8,-3663.7,0,16037,1],[2,2865.6,-3666.2,0,16036,1],[2,2884.8,-3667.7,0,16036,1,16297,1],[2,2846.9,-3673.2,0,16036,1],[2,2544.7,-3678.3,0,16368,1],[2,2567.9,-3678.3,0,16368,1],[2,2882.5,-3684.1,0,16036,1],[2,2899.3,-3686.5,0,16036,1,16037,1,16297,1],[2,2850.8,-3687.4,0,16297,2,16034,1,16037,1],[2,2914.8,-3690.4,0,16037,1],[2,2549.3,-3699.5,0,16448,1],[2,2564.2,-3699.8,0,16448,1],[2,2876.1,-3701.3,0,16036,1],[2,2862.9,-3702.3,0,16037,1],[2,2894.9,-3706.9,0,16036,1],[2,2795.3,-3708.8,"Heigan the Unclean",15936,1],[2,2556.1,-3711.1,0,16448,1],[2,2906.2,-3715.6,0,16037,1],[2,2851.4,-3718,0,16037,1],[2,2869.8,-3718.7,0,16037,1],[2,2881.4,-3723.3,0,16037,1],[2,2530.5,-3736.6,0,16447,4],[2,2582.4,-3737,0,16447,4],[2,2556.9,-3738.7,0,16449,1],[2,2829.4,-3754.7,0,16057,3,16056,2,16236,2],[2,2791.8,-3756.9,0,16056,3,16057,3,16236,3],[2,2866.3,-3757.4,0,16057,3,16056,2,16236,2],[2,2896.7,-3757.7,0,16057,2,16056,1,16236,1],[2,2575.1,-3757.8,0,16448,1],[2,2589.7,-3759.5,0,16448,1],[2,2576.9,-3771.1,0,16448,1],[2,2763.8,-3772.7,0,16057,4,16056,2,16236,2],[2,2608.4,-3774.4,0,16368,1],[2,2844.2,-3777.2,0,16057,5,16236,4,16056,2],[2,2882,-3781,0,16057,5,16056,3,16236,3],[2,2805,-3781.1,0,16057,4,16236,3,16056,2],[2,2591.3,-3790.9,0,16368,1],[2,2665.4,-3831.2,0,16368,1],[2,2648.4,-3848.4,0,16368,1],[2,2676.4,-3860.5,0,16448,3],[2,3175,-3861.5,0,16446,2],[2,2819.8,-3867.5,0,16446,2],[2,3161.6,-3870.6,0,16368,1],[2,2761,-3870.9,0,16368,1],[2,2849.7,-3871.2,0,16368,1],[2,2673.7,-3880.3,0,16447,4],[2,2933.1,-3880.8,0,16447,4],[2,2727.7,-3881.5,0,16447,4,16448,3],[2,2880.1,-3881.5,0,16447,4,16452,2,16451,1],[2,2700.1,-3882.5,0,16449,1],[2,3101.6,-3883,0,16453,2,16449,1],[2,2774.9,-3885.4,0,16446,1],[2,2787.7,-3891.9,0,16446,1],[2,2815.9,-3893.5,0,16446,2],[2,2848.9,-3894.5,0,16368,1],[2,3161.5,-3894.7,0,16368,1],[2,2760.7,-3895.1,0,16368,1],[2,3174,-3907,0,16446,2],[2,3103.6,-3912.6,0,16447,4],[2,2909.4,-3999.5,"Loatheb",16011,1],[3,2522.8,-2953.7,"Four Horsemen",16062,1,16063,1,16064,1,16065,1],[3,2804.8,-2971,0,16446,2],[3,2760.7,-2974.1,0,16368,1],[3,2848.8,-2974.1,0,16368,1],[3,2673.4,-2982.8,0,16447,4],[3,2935.1,-2983.6,0,16447,4],[3,2728.4,-2984.5,0,16447,4,16448,3],[3,2831.2,-2984.7,0,16446,2],[3,2886.2,-2984.8,0,16447,4,16448,3,16452,2,16449,1,16451,1],[3,2699.8,-2985,0,16449,1],[3,2760.2,-2997.7,0,16368,1],[3,2848.8,-2997.8,0,16368,1],[3,2793.4,-3002.6,0,16446,2],[3,2675.1,-3009.5,0,16448,3],[3,2645.3,-3017.9,0,16368,1],[3,2668,-3040.6,0,16368,1],[3,2588.8,-3073.9,0,16368,1],[3,2762.1,-3085.6,0,16803,1],[3,2782.4,-3088,0,16803,1],[3,2610.8,-3096.9,0,16368,1],[3,2755.6,-3098,"Instructor Razuvious",16061,1],[3,2758.3,-3112,0,16803,1],[3,2778.6,-3113.7,0,16803,1],[3,2706,-3125.6,0,16194,2],[3,2529.9,-3126.1,0,16447,4],[3,2581.8,-3126.6,0,16447,4],[3,2556.3,-3128.2,0,16449,1],[3,2850.5,-3138.3,0,16156,3,16163,1],[3,2806.6,-3140,0,16156,3,16163,1],[3,2686.7,-3142.1,0,16215,2],[3,2999.2,-3144.8,0,16018,1],[3,2724.8,-3146.3,0,16215,2],[3,2917.8,-3152.2,0,16067,2],[3,2875.3,-3153.2,0,16067,2],[3,2819.9,-3158,0,16146,2,16145,1],[3,2796.2,-3165.1,0,16145,1,16146,1,16157,1,16158,1],[3,2794.5,-3166.4,0,16156,3,16163,1],[3,2953.1,-3173.1,0,16067,2],[3,2710.4,-3177.4,0,16194,2],[3,2856.6,-3184.4,0,16146,2,16145,1],[3,2924.5,-3188.2,0,16163,2,16861,1],[3,2568,-3189.3,0,16368,1],[3,2545.3,-3189.5,0,16368,1],[3,2806.4,-3192.5,0,16163,2],[3,2952.5,-3201.7,0,16067,2],[3,2981.5,-3203.6,0,16022,5,16020,4,16021,1],[3,2536.3,-3206.4,0,16446,2],[3,2833.4,-3209.3,0,16146,2,16145,1],[3,2880.6,-3210.2,0,16158,3,16146,2,16145,1,16156,1],[3,2686.1,-3216.2,0,16194,2],[3,2729.5,-3220.8,0,16194,2],[3,2877,-3246.9,0,16145,2,16146,2],[3,2574.7,-3247.7,0,16446,2],[3,2708.1,-3248.8,0,16194,2,16216,2],[3,2841.6,-3268.2,0,16164,2,16165,1],[3,2873.9,-3275.5,0,16145,2,16193,1],[3,2909,-3276.9,0,16193,1],[3,2786.2,-3277.3,0,16163,2,16165,2,16164,1],[3,2568.5,-3278.3,0,16368,1],[3,2544.5,-3278.9,0,16368,1],[3,2912,-3291.4,0,16193,2,16164,1],[3,2845.1,-3296.4,0,16167,1],[3,2884.9,-3311.1,0,16145,1,16146,1,16156,1,16158,1],[3,2833,-3325.3,0,16167,4],[3,2556.5,-3335.5,0,16452,2,16449,1,16451,1],[3,2529.7,-3336.4,0,16447,4],[3,2581.6,-3336.9,0,16447,4],[3,2936,-3350.4,0,16145,1],[3,2923.5,-3363.3,0,16145,1],[3,2948.2,-3375,0,16165,2,16164,1],[3,2924.9,-3382.2,0,16154,2,16146,1],[3,2642.2,-3388.4,"Gothik the Harvester",16060,1],[4,3488.6,-2953.4,"Thaddius",15928,1,15929,1,15930,1],[4,3175.1,-2966.1,0,16446,2],[4,3161.6,-2972.7,0,16368,1],[4,3249.2,-2973.2,0,16368,1],[4,3229.4,-2981.6,0,16446,2],[4,3076.3,-2983,0,16447,4],[4,3132,-2984.3,0,16447,4,16448,3],[4,3101.1,-2985.7,0,16452,2,16449,1,16451,1],[4,3282.8,-2987.5,0,16447,4,16448,3],[4,3335.9,-2987.9,0,16447,4],[4,3310.4,-2989.6,0,16449,1],[4,3249,-2997.8,0,16368,1],[4,3161.8,-2998.8,0,16368,1],[4,3175.2,-3007.8,0,16446,2],[4,3333.8,-3012.4,0,16448,3],[4,3362.1,-3020.3,0,16368,1],[4,3344.9,-3037.8,0,16368,1],[4,3086,-3070.6,0,16018,1],[4,3419.5,-3077.2,0,16368,1],[4,3103.4,-3085.8,0,16022,5,16020,4,16021,1],[4,3402.1,-3094.9,0,16368,1],[4,3034,-3102.5,0,16018,1],[4,3116.2,-3104.3,0,16018,1],[4,3061.5,-3106.5,0,16022,5,16020,4,16021,1],[4,3431.1,-3119.9,0,16447,4,16448,3],[4,3124.7,-3120.9,0,16018,1],[4,3479.1,-3126.7,0,16447,4],[4,3453.6,-3128.4,0,16449,1],[4,3027.6,-3141.2,0,16022,5,16020,4,16021,1],[4,3283.1,-3157,"Gluth",15932,1],[4,3455.5,-3166.1,0,16448,3],[4,3016,-3183.2,0,16017,4],[4,3441.7,-3190,0,16368,1],[4,3465.5,-3190.2,0,16368,1],[4,3455.1,-3205.8,0,16446,2],[4,3102.1,-3209.2,0,16018,1],[4,3135.8,-3211.4,0,16024,20],[4,2990.6,-3227,0,16018,1],[4,3308.5,-3232.1,"Patchwerk",16028,1],[4,3471.2,-3246.7,0,16446,2],[4,3440.3,-3247.9,0,16446,2],[4,3002.6,-3248.8,0,16022,5,16020,4,16021,1],[4,3154.4,-3268.2,0,16017,2],[4,3441,-3278.1,0,16368,1],[4,3466,-3278.5,0,16368,1],[4,3168.3,-3280.8,0,16017,1],[4,3202.7,-3282.6,0,16025,1],[4,3109.1,-3284.2,0,16017,1],[4,3174.1,-3291.9,0,16017,1],[4,3096.7,-3292.5,0,16018,1],[4,3332,-3300.3,0,16025,1],[4,3140.7,-3302.6,0,16018,1],[4,3088.1,-3305.5,0,16017,1],[4,3453.4,-3305.7,0,16448,3],[4,3202.7,-3306.6,0,16025,1],[4,3253.3,-3310.7,"Grobbulus",15931,1],[4,3332.4,-3324.5,0,16025,1],[4,3161.3,-3328.9,0,16017,1,16018,1],[4,3202.5,-3330.2,0,16025,1],[4,3110.3,-3333.1,0,16018,1],[4,3427,-3336.1,0,16447,4],[4,3478.9,-3336.6,0,16447,4],[4,3453.6,-3336.9,0,16452,2,16449,1,16451,1],[4,3149,-3345.1,0,16018,1],[4,2955.6,-3351.9,0,16154,2,16146,1],[4,3074.6,-3353.3,0,16017,1],[4,3136.6,-3353.3,0,16017,1],[4,3054.9,-3356.8,0,16017,1],[4,3262.9,-3358,0,16025,1],[4,3291.2,-3360.8,0,16025,1],[4,3087.4,-3367.6,0,16017,1],[4,3086,-3386.8,0,16017,1],[5,3746.4,-5113.4,"Kel'Thuzad",15990,1],[5,3521.5,-5234.9,"Sapphiron"]],"alts":{"16194":[16194,16215,16216],"16018":[16018,16029],"16156":[16156,16157,16158]}},"Temple of Ahn'Qiraj":{"packs":[[1,-8566.3,2172.1,"Silithid Royalty",15511,1,15543,1,15544,1],[1,-8182.6,2166.2,0,15264,1],[1,-8206.2,2164.8,0,15264,1],[1,-8159.4,2144.2,0,15264,1],[1,-8322,2142.7,0,15264,1],[1,-8258,2124.3,0,15262,1],[1,-8547,2123.4,0,15233,3,15247,2],[1,-8156.5,2119.6,0,15264,1],[1,-8314.3,2119.2,0,15264,1],[1,-8590.5,2117,0,15230,3],[1,-8629.1,2101.5,0,15233,3,15247,2],[1,-8346,2081,"The Prophet Skeram",15263,1],[1,-8297.4,2075.7,0,15264,1],[1,-8377,2070.6,0,15262,1],[1,-8277.6,2067.6,0,15262,1],[1,-8397.8,2061.7,0,15233,2,15247,1],[1,-8381.8,2058.4,0,15233,6],[1,-8288.9,2054.5,0,15264,1],[1,-8589,1975,0,15233,3,15247,1],[1,-8400,1928.4,0,15233,6],[1,-8339,1900.6,0,15233,6],[1,-8351.4,1807.8,0,15233,6],[1,-8329.9,1762.8,0,15230,3],[1,-8281.9,1688.7,"Battleguard Sartura",15984,3,15516,1],[1,-8147.9,1682,0,15300,2],[1,-8097.7,1677.2,0,15300,1],[1,-8078.2,1671.6,0,15300,2],[1,-8165.5,1670.5,0,15229,1,15300,1],[1,-8136.5,1667.5,0,15300,1],[1,-8116.4,1663.1,0,15300,5],[1,-8088.7,1661.3,0,15300,1],[1,-8057.8,1657.4,0,15300,1],[1,-8147.6,1655.3,0,15300,3],[1,-8065.5,1646.8,0,15300,1],[1,-8088.3,1646.3,0,15300,2],[1,-8034.3,1645.7,0,15300,1],[1,-8048,1641.7,0,15300,2],[1,-8165.4,1641.3,0,15300,2],[1,-8093.3,1631.6,0,15300,3],[1,-8141,1631.2,0,15300,2],[1,-8163.4,1627.1,0,15300,1],[1,-8181.2,1626,0,15300,2],[1,-8025.9,1624.8,0,15300,1],[1,-8007.8,1624.3,0,15300,2],[1,-8132.7,1619.5,0,15300,3],[1,-8106,1618.5,0,15300,1],[1,-8170.2,1614,0,15300,1],[1,-8154.6,1613.1,0,15300,1],[1,-8032.6,1609.7,0,15300,3],[1,-8072.3,1604.7,0,15300,1],[1,-8102.6,1599.9,0,15300,1],[1,-8057,1599,0,15300,2],[1,-8087,1594.6,0,15300,1],[1,-8003.2,1594.6,0,15300,3],[1,-8066.3,1588.6,0,15300,1],[1,-7989.8,1587,0,15300,2],[1,-8045.9,1582.9,0,15300,1],[1,-8056.1,1575.9,0,15300,1],[1,-7977.8,1572.4,0,15229,1],[1,-7954.9,1563.8,0,15300,2],[1,-7971.7,1558.3,0,15300,1],[1,-8010.1,1556.9,0,15300,1],[1,-7988,1556.2,0,15300,1],[1,-8029.3,1551.5,0,15300,2,15229,1],[1,-8006.8,1543.5,0,15300,1],[1,-7955.6,1541.3,0,15300,1],[1,-8025.2,1536.3,0,15300,3],[2,-9173.6,2103.8,"Ouro",15957,1],[2,-9072.3,1980.9,0,15246,4,15252,1],[2,-9016.4,1920.3,0,15312,1],[2,-8997.9,1920.2,0,15311,1],[2,-8995.4,1903.3,0,15312,1],[2,-8913.3,1875.2,0,15312,1],[2,-8909.5,1860.7,0,15311,1],[2,-9020.9,1856.6,0,15246,4,15252,1],[2,-8919,1846.4,0,15312,1],[2,-9133.9,1813.2,0,15311,1],[2,-9122.2,1809.7,0,15312,1],[2,-9140.4,1802,0,15312,1],[2,-9087.1,1781.5,0,15312,1],[2,-8619.7,1770.2,0,15236,3,15235,1],[2,-9083.6,1767.9,0,15311,1],[2,-9135.5,1758,0,15246,4,15252,1],[2,-9091,1756,0,15312,1],[2,-8647.2,1710.1,0,15236,3,15235,1],[2,-8532.1,1696.5,"Princess Huhuran",15509,1],[2,-9180.1,1683.3,0,15317,1],[2,-9193.9,1677,0,15317,2],[2,-9179.3,1667.1,0,15317,1],[2,-9191.7,1653.5,0,15317,1],[2,-9188.1,1629.7,0,15317,1],[2,-8786.3,1625.4,0,15317,1],[2,-8758.1,1575.5,0,15277,1,15317,1],[2,-7967.5,1531.7,0,15300,6],[2,-7934,1528.9,0,15300,1],[2,-7927.1,1518.3,0,15300,1],[2,-7937.9,1506.1,0,15300,1],[2,-7956,1498.9,0,15300,1],[2,-7930.9,1488.7,0,15300,7,15229,1],[2,-7902.3,1475.7,0,15300,3],[2,-8669.5,1471.4,0,15236,3,15235,1],[2,-7917.2,1468.3,0,15300,1],[2,-8687.6,1457.9,0,15236,3,15235,1],[2,-7936.1,1457.4,0,15300,2],[2,-7908.9,1454.4,0,15300,3],[2,-7913.4,1438,0,15300,3],[2,-7892.5,1436.5,0,15300,1],[2,-7892.7,1423.1,0,15300,1],[2,-8604.1,1420.1,0,15236,3,15235,1],[2,-7924.9,1417.6,0,15300,2],[2,-7908.4,1404.1,0,15300,7,15229,1],[2,-7927.8,1389.8,0,15300,1],[2,-7902.7,1378.2,0,15300,1],[2,-7919,1377,0,15300,1],[2,-7936.3,1375.9,0,15300,2],[2,-8509.7,1372.6,0,15240,2],[2,-7926.4,1355.2,0,15300,7],[2,-8360.7,1354.7,0,15240,2],[2,-7958.1,1341.7,0,15300,3],[2,-7945.3,1330.4,0,15300,1],[2,-7929.7,1324.7,0,15300,2],[2,-7958.5,1315.6,0,15300,4,15229,1],[2,-7990.3,1300.8,0,15300,3],[2,-7974.1,1295.2,0,15300,2],[2,-7961,1280.2,0,15300,3],[2,-7992.9,1277.1,0,15300,5],[2,-8004.9,1257.4,0,15300,1],[2,-8164.1,1225.1,0,15240,2],[2,-8085.4,1196.7,"Fankriss the Unyielding",15510,1],[2,-8000.2,928.6,"Viscidus",15299,1],[3,-8578.7,1986,"C'Thun",15589,1,15727,1],[3,-9216.1,1576,0,15317,2],[3,-9173.8,1571.4,0,15246,4,15252,1],[3,-9234,1568,0,15317,1],[3,-8891,1566.1,0,15317,1],[3,-8902.3,1526.5,0,15317,1],[3,-9203.1,1524.5,0,15317,4],[3,-8873.3,1518.9,0,15277,1],[3,-9146.1,1509.7,0,15246,4,15252,1],[3,-8826.5,1499.5,0,15277,1,15317,1],[3,-9173.9,1477,0,15317,4],[3,-8937.8,1457.6,0,15277,1],[3,-8719.4,1450.8,0,15236,3,15235,1],[3,-9103.6,1446.4,0,15317,1],[3,-9047.9,1416.7,0,15317,4],[3,-9138,1409.5,0,15246,4,15252,1],[3,-9122.6,1402.8,0,15317,1],[3,-9089.3,1401,0,15317,1],[3,-9075.2,1389.6,0,15246,4,15317,3,15252,1],[3,-8922.6,1367.2,0,15277,1,15317,1],[3,-9091.8,1351.7,0,15246,4,15317,4,15252,1],[3,-8967,1337.8,0,15317,1],[3,-8953.2,1333.5,0,15317,3],[3,-9001.7,1323,0,15317,1],[3,-9032.2,1322.9,0,15317,1],[3,-8990.1,1319.8,0,15316,1],[3,-8960.7,1308.8,0,15316,1],[3,-8979.9,1306.1,0,15316,1],[3,-8925.1,1291.8,0,15316,1],[3,-8906.9,1285.3,0,15317,1],[3,-8951.5,1285.2,0,15317,1],[3,-8926.7,1271.1,0,15316,1],[3,-8894.3,1271,0,15317,1],[3,-8989.9,1265,0,15317,8,15316,3],[3,-8886.3,1259.7,0,15316,1,15317,1],[3,-8906.5,1257.5,0,15317,2,15316,1],[3,-8947.9,1250.1,0,15317,1],[3,-9005,1249.5,0,15317,1],[3,-9025.3,1235.2,0,15316,1],[3,-8954.8,1234.6,0,15317,1],[3,-8953.3,1233.6,0,15963,1],[3,-8861.5,1233.1,0,15316,1],[3,-8979.4,1231.1,0,15316,1],[3,-8937.8,1229.1,0,15317,1],[3,-9008.6,1226.5,0,15316,1],[3,-8918.6,1213.8,0,15317,5,15316,2],[3,-8950.6,1210.4,0,15317,1],[3,-8982.6,1206.8,0,15317,6,15316,3],[3,-8860.1,1191.5,0,15317,1],[3,-8946,1191.1,"Twin Emperors",15317,4,15275,1,15276,1],[3,-9041.7,1189.5,0,15317,3,15316,1],[3,-8873.9,1185,0,15317,1],[3,-8950.9,1182.5,0,15316,3,15317,3],[3,-8863.4,1178.8,0,15317,1],[3,-8961.7,1166.1,0,15317,2]],"alts":{"15236":[15236,15249],"15246":[15246,15250]}}};
 // Reports are read through the Readycheck relay, which holds the
 // Warcraft Logs app key, so nobody has to sign in. It only reads.
 var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
@@ -383,8 +593,35 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
           var ev = d2.reportData.report.events;
           deaths = deaths.concat(ev.data || []);
           if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return page(ev.nextPageTimestamp);
-          return { report: report, deaths: deaths };
+          return places(0);
         });
+      }
+      // where each mob died, so packs pulled back to back can be told
+      // apart; if this part fails the route is still made without it
+      var kills = [];
+      function places(start) {
+        status("Finding the packs... " + kills.length);
+        return gql("killpos", p, { start: start, end: end }).then(function (d3) {
+          var ev = d3 && d3.reportData && d3.reportData.report && d3.reportData.report.events;
+          if (!ev) return pulled(0);
+          kills = kills.concat(ev.data || []);
+          if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return places(ev.nextPageTimestamp);
+          return pulled(0);
+        }).catch(function () { return pulled(0); });
+      }
+      // when each mob was pulled (the first debuff on it), so mobs pulled
+      // together stay one step even when they die one at a time
+      var engages = [];
+      function pulled(start) {
+        status("Working out the pulls... " + engages.length);
+        var done = function () { return { report: report, deaths: deaths, kills: kills, engages: engages }; };
+        return gql("engage", p, { start: start, end: end }).then(function (d4) {
+          var ev = d4 && d4.reportData && d4.reportData.report && d4.reportData.report.events;
+          if (!ev) return done();
+          engages = engages.concat(ev.data || []);
+          if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return pulled(ev.nextPageTimestamp);
+          return done();
+        }).catch(done);
       }
       return page(0);
     });
@@ -400,6 +637,8 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
   }
   function render(routes) {
     var out = $("out"); out.textContent = "";
+    window.__lastRoutes = routes;
+    var byPack = !!(routes.positions && routes.positions.matched > 0);
     if (!routes.length) { status("No Molten Core, Blackwing Lair, Ahn'Qiraj or Naxxramas fights in that report.", "err"); return; }
     function pl(n, one, many) { return n + " " + (n === 1 ? one : many); }
     routes.forEach(function (r) {
@@ -412,7 +651,10 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
         var note = document.createElement("div"); note.className = "note";
         note.textContent = pl(r.chains, "fight was a chain pull", "fights were chain pulls") + " (packs pulled back to back) and " +
           (r.chains === 1 ? "was" : "were") + " split into " + pl(r.split, "step", "steps") + ", marked \"split\" below. " +
-          "Check those look like separate packs; if a slow pack got cut in two, untick the split option under Options and make the route again.";
+          (byPack ? "Each of those steps is one pack, found from where its mobs died, and is already placed on the raid map. " +
+                    "If the steps look too fine, untick the split option under Options and make the route again."
+                  : "This log has no positions, so a 20 second gap between kills was taken as the next pack. " +
+                    "Check those look like separate packs; if a slow pack got cut in two, untick the split option under Options.");
         box.appendChild(note);
       }
       var ol = document.createElement("ol");
@@ -436,7 +678,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     if (!p) { status("Paste the whole report link - it starts with https:// and has /reports/ in it.", "err"); return; }
     var opts = { bosses: $("optBoss").checked, standingOnly: $("optStanding").checked, numberPulls: $("optNumber").checked, splitChains: $("optSplit").checked };
     $("make").disabled = true;
-    fetchReport(p).then(function (data) { render(RouteCore.buildRoutes(data, RAID_MOBS, opts)); })
+    fetchReport(p).then(function (data) { render(RouteCore.buildRoutes(data, RAID_MOBS, opts, RAID_PACKS)); })
       .catch(function (e) { status(e.message || String(e), "err"); })
       .then(function () { $("make").disabled = false; });
   };
