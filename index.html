@@ -47,6 +47,7 @@ button:disabled{opacity:.5;cursor:default}
 .raid li .steptext.clickable{cursor:pointer;border-bottom:1px dotted var(--line)}
 .raid li .steptext.clickable:hover{color:var(--accent);border-bottom-color:var(--accent)}
 .raid li .steptext.open{color:var(--accent)}
+.raid li .steptext.named{font-style:italic}
 .raid li .icons{margin-left:8px;vertical-align:middle}
 .raid li .icons .ico{display:inline-block;width:18px;height:18px;vertical-align:middle;margin:0 2px}
 .raid li .icons a.ico ins{vertical-align:top}
@@ -1030,12 +1031,6 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
       remList.appendChild(add);
     }
     drawRems();
-    // Label (the step's own name in the route)
-    if (field !== "pull") {
-      var lab = document.createElement("input"); lab.type = "text"; lab.value = c.desc; lab.maxLength = 60; lab.placeholder = "optional - shown instead of the mob list";
-      lab.oninput = function () { c.desc = lab.value; changed(); };
-      fieldRow(panel, "Label:").appendChild(lab);
-    }
   }
   // the "edit" link and summary on a step, and the editor under it
   // small icons for a step row, like the in-game route list: an item as a
@@ -1095,18 +1090,33 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
       applyPicks(window.__lastRoutes);
     }
     textEl.onclick = function () {
-      pk = picks[r.raid] = picks[r.raid] || {}; pk = pk[i] = pk[i] || {};
+      picks[r.raid] = picks[r.raid] || {}; pk = picks[r.raid][i] = picks[r.raid][i] || {};
       pk.open = panel.hidden; panel.hidden = !pk.open;
       textEl.classList.toggle("open", pk.open);
       if (pk.open && !panel.childNodes.length) build();
     };
+    function showName() {
+      var c = pk[s.type === "kills" ? "then" : "after"];
+      var name = (c && c.desc) || "";
+      textEl.textContent = name || RouteCore.stepText(s);
+      textEl.classList.toggle("named", !!name);
+      textEl.title = name ? RouteCore.stepText(s) + " - click to set this step up" : "Click to set this step up";
+    }
     function build() {
+      // the step's name (its label in the route list), like in game
+      var field = s.type === "kills" ? "then" : "after";
+      var c = cfgOf(r, i, field);
+      var lab = document.createElement("input"); lab.type = "text"; lab.value = c.desc; lab.maxLength = 60;
+      lab.placeholder = "optional - shown instead of " + (s.type === "kills" ? "the mob list" : "\"Kill " + s.boss + "\"");
+      lab.oninput = function () { c.desc = lab.value; showName(); refresh(); };
+      fieldRow(panel, "Name:").appendChild(lab);
       if (s.type === "kills") section(panel, r, i, "then", null, refresh);
       else { section(panel, r, i, "pull", "When " + s.boss + " is pulled", refresh); section(panel, r, i, "after", "After the kill", refresh); }
     }
     pk = picks[r.raid] && picks[r.raid][i] || {};
     if (pk.open) build();
     li.appendChild(panel);
+    showName();
     refresh();
   }
   function render(routes, keepScroll) {
