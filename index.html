@@ -44,10 +44,13 @@ button:disabled{opacity:.5;cursor:default}
 .set b{margin-right:4px}
 .set .src{color:var(--muted);font-size:12px}
 .set a{font-size:12px}
-.raid li .cfgline{display:block;margin:2px 0 4px;font-size:12px;color:var(--muted)}
-.raid li .cfgline .sum{margin-left:8px}
-.raid li .more{color:var(--accent);cursor:pointer;font-size:12px;white-space:nowrap}
-.raid li .more:hover{text-decoration:underline}
+.raid li .steptext.clickable{cursor:pointer;border-bottom:1px dotted var(--line)}
+.raid li .steptext.clickable:hover{color:var(--accent);border-bottom-color:var(--accent)}
+.raid li .steptext.open{color:var(--accent)}
+.raid li .icons{margin-left:8px;vertical-align:middle}
+.raid li .icons .ico{display:inline-block;width:18px;height:18px;vertical-align:middle;margin:0 2px}
+.raid li .icons a.ico ins{vertical-align:top}
+.raid li .icons .glabel{font-size:11px;color:var(--muted);margin:0 2px 0 6px;vertical-align:middle}
 .raid li .cfg{background:var(--panel);border:1px solid var(--line);padding:8px 10px;margin:2px 0 8px;color:var(--text);font-size:13px}
 .raid li .cfg .ftitle{font-weight:600;color:var(--gold);margin:6px 0 4px}
 .raid li .cfg .frow{display:flex;gap:8px;align-items:flex-start;margin:4px 0;flex-wrap:wrap}
@@ -703,7 +706,10 @@ var RouteCore = (function () {
     var sets = data.sets.filter(function (st) { return st && typeof st.name === "string" && st.items; }).map(function (st) {
       var items = {};
       Object.keys(st.items).forEach(function (k) { var id = Number(st.items[k]); if (id > 0) items[Number(k)] = id; });
-      return { name: st.name, src: st.src === "ir" ? "ItemRack" : "Readycheck", items: items };
+      var o = { name: st.name, src: st.src === "ir" ? "ItemRack" : "Readycheck", items: items };
+      if (typeof st.ic === "string" && /^[a-z0-9_\-]+$/i.test(st.ic)) o.icon = st.ic.toLowerCase();
+      if (Number(st.ici) > 0) o.iconItem = Number(st.ici);
+      return o;
     });
     // gear on the character and in its bags: { id, name, slots[] }
     var gear = [];
@@ -848,7 +854,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     function pl(n, one, many) { return n + " " + (n === 1 ? one : many); }
     info.textContent = (c.name || "Your character") + (c.class ? " (" + c.class.charAt(0) + c.class.slice(1).toLowerCase() + ")" : "") + ": " +
       pl(c.sets.length, "gear set", "gear sets") + ", " + pl(c.gear.length, "item", "items") + " and " + pl(c.use.length, "consumable", "consumables") +
-      ". Click \"edit\" on any step below to set it up like in game; nothing changes in game until you paste the route.";
+      ". Click a step below to set it up like in game; nothing changes in game until you paste the route.";
     c.sets.forEach(function (st) {
       var row = document.createElement("div"); row.className = "set";
       var b = document.createElement("b"); b.textContent = st.name; row.appendChild(b);
@@ -1032,24 +1038,66 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     }
   }
   // the "edit" link and summary on a step, and the editor under it
-  function stepEditor(li, r, i, s) {
+  // small icons for a step row, like the in-game route list: an item as a
+  // Wowhead icon link (their script fills it in and gives it a tooltip),
+  // anything else as a plain icon picture
+  var ICON_BASE = "https://wow.zamimg.com/images/wow/icons/small/";
+  function itemIcon(id, title) {
+    var a = document.createElement("a");
+    a.href = "https://www.wowhead.com/classic/item=" + id; a.target = "_blank"; a.rel = "noopener";
+    a.setAttribute("data-wh-rename-link", "false"); a.setAttribute("data-wh-icon-size", "small");
+    a.className = "ico"; if (title) a.title = title;
+    return a;
+  }
+  function plainIcon(name, title) {
+    var img = document.createElement("img"); img.src = ICON_BASE + name + ".jpg"; img.width = 18; img.height = 18; img.className = "ico"; img.alt = title || ""; img.title = title || "";
+    return img;
+  }
+  function setIcon(name) {
+    var st = character.sets.filter(function (x) { return x.name === name; })[0];
+    if (st && st.iconItem) return itemIcon(st.iconItem, "Gear set: " + name);
+    return plainIcon((st && st.icon) || "inv_chest_plate16", "Gear set: " + name);
+  }
+  function iconsOf(c, into) {
+    if (!c) return 0;
+    var n = 0;
+    function add(e) { into.appendChild(e); n++; }
+    if (c.set) add(setIcon(c.set));
+    if (c.t1) add(itemIcon(c.t1, "Trinket 1"));
+    if (c.t2) add(itemIcon(c.t2, "Trinket 2"));
+    SLOT_LIST.forEach(function (e) { var id = c.slots[e[0]]; if (!id) return; add(id === -1 ? plainIcon("inv_misc_bag_08", e[1] + ": leave empty") : itemIcon(id, e[1])); });
+    c.rems.forEach(function (x) {
+      if (!x.text && !x.itemId) return;
+      if (x.itemId === "dummy") add(plainIcon("inv_crate_02", x.text));
+      else if (x.itemId) add(itemIcon(x.itemId, x.text));
+      else add(plainIcon("inv_misc_note_01", x.text));
+    });
+    return n;
+  }
+  // click the step's text to open its editor; its icons sit after the text
+  function stepEditor(li, textEl, r, i, s) {
     var pk = (picks[r.raid] || {})[i] || {};
-    var line = el("span", "cfgline");
-    var sum = el("span", "sum");
-    var link = el("span", "more", pk.open ? "done" : "edit");
-    line.appendChild(link); line.appendChild(sum);
-    li.appendChild(line);
+    var icons = el("span", "icons");
+    li.appendChild(icons);
     var panel = el("div", "cfg"); panel.hidden = !pk.open;
+    textEl.classList.add("clickable"); textEl.title = "Click to set this step up";
+    if (pk.open) textEl.classList.add("open");
     function refresh() {
-      var parts = [];
-      if (s.type === "kills") parts = summaryOf(pk.then);
-      else { summaryOf(pk.pull).forEach(function (t) { parts.push("Pull - " + t); }); summaryOf(pk.after).forEach(function (t) { parts.push("After - " + t); }); }
-      sum.textContent = parts.length ? parts.join(" | ") : "";
+      icons.textContent = "";
+      if (s.type === "kills") iconsOf(pk.then, icons);
+      else {
+        var pull = el("span", "grp"), after = el("span", "grp");
+        var np = iconsOf(pk.pull, pull), na = iconsOf(pk.after, after);
+        if (np) { icons.appendChild(el("span", "glabel", "pull")); icons.appendChild(pull); }
+        if (na) { icons.appendChild(el("span", "glabel", "after")); icons.appendChild(after); }
+      }
+      nameItems();
       applyPicks(window.__lastRoutes);
     }
-    link.onclick = function () {
+    textEl.onclick = function () {
       pk = picks[r.raid] = picks[r.raid] || {}; pk = pk[i] = pk[i] || {};
-      pk.open = panel.hidden; panel.hidden = !pk.open; link.textContent = pk.open ? "done" : "edit";
+      pk.open = panel.hidden; panel.hidden = !pk.open;
+      textEl.classList.toggle("open", pk.open);
       if (pk.open && !panel.childNodes.length) build();
     };
     function build() {
@@ -1087,7 +1135,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
       }
       var ol = document.createElement("ol");
       r.steps.forEach(function (s, i) {
-        var li = document.createElement("li"); li.textContent = RouteCore.stepText(s);
+        var li = document.createElement("li"); var textEl = el("span", "steptext", RouteCore.stepText(s)); li.appendChild(textEl);
         if (s.type === "encounter") li.className = "boss";
         if (s.split) { var tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "split"; li.appendChild(tag); }
         if (s.dropped && s.dropped.length) {
@@ -1095,7 +1143,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
           rest.textContent = " (with " + s.dropped.map(function (m) { return m.kills + "x " + m.mob; }).join(", ") + ")";
           li.appendChild(rest);
         }
-        if (character) stepEditor(li, r, i, s);
+        if (character) stepEditor(li, textEl, r, i, s);
         ol.appendChild(li);
       });
       box.appendChild(ol);
@@ -1111,10 +1159,16 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
   // Wowhead's script names and icons item links that were on the page
   // when it loaded; links added later need a nudge (and a retry while
   // the script is still on its way)
+  var nameTimer = null;
   function nameItems(tries) {
     tries = tries || 0;
     var wh = window.$WowheadPower;
-    if (wh && wh.refreshLinks) { try { wh.refreshLinks(); } catch (e) {} return; }
+    if (wh && wh.refreshLinks) {
+      // many calls in a row (one per step) become one refresh
+      if (nameTimer) clearTimeout(nameTimer);
+      nameTimer = setTimeout(function () { nameTimer = null; try { wh.refreshLinks(); } catch (e) {} }, 50);
+      return;
+    }
     if (tries < 20) setTimeout(function () { nameItems(tries + 1); }, 500);
   }
   $("make").onclick = function () {
