@@ -31,7 +31,7 @@ button:disabled{opacity:.5;cursor:default}
 .ok{color:var(--green);font-weight:600}
 .raid{background:var(--panel2);border:1px solid var(--line);padding:14px;margin-top:12px}
 .raid h3{margin:0 0 4px;font-size:16px}
-.raid ol{margin:8px 0;padding-left:30px;max-height:280px;overflow:auto;font-size:14px}
+.raid ol{margin:8px 0;padding-left:30px;max-height:65vh;overflow:auto;font-size:14px}
 .raid li.boss{color:var(--gold)}
 .raid li .tag{margin-left:8px;padding:0 6px;border:1px solid var(--accent);color:var(--accent);font-size:12px}
 .raid .note{color:var(--accent);margin:6px 0 2px}
@@ -44,8 +44,26 @@ button:disabled{opacity:.5;cursor:default}
 .set b{margin-right:4px}
 .set .src{color:var(--muted);font-size:12px}
 .set a{font-size:12px}
-.raid li .pick{display:block;margin:3px 0 6px;color:var(--muted);font-size:13px}
-.raid li .pick select{background:var(--field);color:var(--text);border:1px solid var(--line);padding:3px 6px;font:13px system-ui,sans-serif;margin:0 10px 2px 4px;max-width:220px}
+.raid li .cfgline{display:block;margin:2px 0 4px;font-size:12px;color:var(--muted)}
+.raid li .cfgline .sum{margin-left:8px}
+.raid li .more{color:var(--accent);cursor:pointer;font-size:12px;white-space:nowrap}
+.raid li .more:hover{text-decoration:underline}
+.raid li .cfg{background:var(--panel);border:1px solid var(--line);padding:8px 10px;margin:2px 0 8px;color:var(--text);font-size:13px}
+.raid li .cfg .ftitle{font-weight:600;color:var(--gold);margin:6px 0 4px}
+.raid li .cfg .frow{display:flex;gap:8px;align-items:flex-start;margin:4px 0;flex-wrap:wrap}
+.raid li .cfg .flabel{width:84px;flex:none;color:var(--muted);padding-top:4px}
+.raid li .cfg .field{flex:1;min-width:200px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.raid li .cfg select,.raid li .cfg input[type=text]{background:var(--field);color:var(--text);border:1px solid var(--line);padding:3px 6px;font:13px system-ui,sans-serif;max-width:260px}
+.raid li .cfg input[type=text]{width:220px}
+.raid li .cfg input.delay{width:48px;background:var(--field);color:var(--text);border:1px solid var(--line);padding:3px 4px;font:13px system-ui,sans-serif}
+.raid li .cfg .fnote{color:var(--muted);font-size:12px}
+.raid li .cfg .chips,.raid li .cfg .rems{display:flex;flex-direction:column;gap:4px;width:100%}
+.raid li .cfg .chip{display:inline-block;align-self:flex-start;padding:0 6px;border:1px solid var(--line);background:var(--field);font-size:12px}
+.raid li .cfg .chip span,.raid li .cfg .rem .x{color:var(--muted);cursor:pointer;margin-left:6px}
+.raid li .cfg .chip span:hover,.raid li .cfg .rem .x:hover{color:var(--red)}
+.raid li .cfg .rem{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.raid li .cfg .rem .cb{display:flex;gap:3px;align-items:center;font-size:12px;color:var(--muted)}
+.raid li .cfg button.small{padding:3px 8px;font-size:12px}
 details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px}
 .steps{margin:0;padding-left:22px}
 .steps li{margin:4px 0}
@@ -82,7 +100,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 <p class="hint">This replaces that raid's route, but gear and reminders you set on your old steps are kept wherever they still fit.</p>
 <div class="raid" id="charCard">
 <h3>Your character</h3>
-<p class="hint">Optional. To pick gear sets for the steps right here: in game, click <b>From Logs</b> on the Route page, then <b>Copy my character</b>, and paste the text below. Your gear sets (Readycheck's and ItemRack's) then show up as choices on every step, and go into the game with the route.</p>
+<p class="hint">Optional. To set up the steps right here: in game, click <b>From Logs</b> on the Route page, then <b>Copy my character</b>, and paste the text below. Your gear sets (Readycheck's and ItemRack's), the gear you carry and the consumables in your bags then show up as choices on every step - a set to wear, trinkets, single items to swap and things to be reminded to use - and go into the game with the route.</p>
 <textarea id="charText" placeholder="Paste the text from Copy my character here (it starts with WRCHAR1)" spellcheck="false"></textarea>
 <div id="charInfo" class="hint"></div>
 <div id="charSets" class="sets"></div>
@@ -687,7 +705,20 @@ var RouteCore = (function () {
       Object.keys(st.items).forEach(function (k) { var id = Number(st.items[k]); if (id > 0) items[Number(k)] = id; });
       return { name: st.name, src: st.src === "ir" ? "ItemRack" : "Readycheck", items: items };
     });
-    return { name: name, class: data.class || "", sets: sets };
+    // gear on the character and in its bags: { id, name, slots[] }
+    var gear = [];
+    (Array.isArray(data.gear) ? data.gear : []).forEach(function (g) {
+      if (!g || !(Number(g.id) > 0) || typeof g.n !== "string") return;
+      var slots = (Array.isArray(g.s) ? g.s : []).map(Number).filter(function (x) { return x >= 1 && x <= 18; });
+      if (slots.length) gear.push({ id: Number(g.id), name: g.n, slots: slots });
+    });
+    // raid consumables in its bags: { id, name, cat }
+    var use = [];
+    (Array.isArray(data.use) ? data.use : []).forEach(function (u) {
+      if (!u || !(Number(u.id) > 0) || typeof u.n !== "string") return;
+      use.push({ id: Number(u.id), name: u.n, cat: typeof u.c === "string" ? u.c : "" });
+    });
+    return { name: name, class: data.class || "", sets: sets, gear: gear, use: use };
   }
 
   // One step as words, for the preview
@@ -802,8 +833,6 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
   var last = { p: null, data: null, opts: null };   // what the last route was made from
   var SLOT_ORDER = [1, 2, 3, 15, 5, 9, 10, 6, 7, 8, 11, 12, 13, 14, 16, 17, 18];
   var character = null;   // { name, class, sets }
-  var picks = {};         // raid -> { stepIndex: { then, pull, after } } - the gear picked on the page
-
   // ---- the pasted character: its gear sets become the choices on each step
   function showCharacter(text, quiet) {
     var info = $("charInfo"), sets = $("charSets");
@@ -816,8 +845,10 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     character = c;
     remember("rcroutes.char", text);
     info.className = "hint";
+    function pl(n, one, many) { return n + " " + (n === 1 ? one : many); }
     info.textContent = (c.name || "Your character") + (c.class ? " (" + c.class.charAt(0) + c.class.slice(1).toLowerCase() + ")" : "") + ": " +
-      c.sets.length + " gear set" + (c.sets.length === 1 ? "" : "s") + ". Pick them on the steps below; nothing changes in game until you paste the route.";
+      pl(c.sets.length, "gear set", "gear sets") + ", " + pl(c.gear.length, "item", "items") + " and " + pl(c.use.length, "consumable", "consumables") +
+      ". Click \"edit\" on any step below to set it up like in game; nothing changes in game until you paste the route.";
     c.sets.forEach(function (st) {
       var row = document.createElement("div"); row.className = "set";
       var b = document.createElement("b"); b.textContent = st.name; row.appendChild(b);
@@ -832,24 +863,73 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
   function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   $("charText").oninput = function () { showCharacter($("charText").value); };
 
-  // ---- gear picked on a step goes into that raid's route
-  // kills step: the set to put on once the pull is dead (actions.gearSet).
-  // boss step: the set for the boss (a "start" step before the kill) and
-  // the one for after the kill (the "end" step's own set).
+  // ---- setting the steps up, the way the in-game step editor does
+  var picks = {};   // raid -> stepIndex -> { then | pull | after: cfg, open }
+  // cfg = { set, t1, t2, slots: {slot: id | -1}, rems: [{text, itemId, tts, delay}], desc }
+  var SLOT_LIST = [[1, "Head"], [2, "Neck"], [3, "Shoulder"], [15, "Back"], [5, "Chest"], [9, "Wrist"], [10, "Hands"], [6, "Waist"],
+    [7, "Legs"], [8, "Feet"], [11, "Ring 1"], [12, "Ring 2"], [16, "Main Hand"], [17, "Off Hand"], [18, "Ranged"]];
+  var SLOT_NAME = {}; SLOT_LIST.forEach(function (e) { SLOT_NAME[e[0]] = e[1]; });
+  var CAT_NAME = { flasks: "Flask", elixirs: "Elixir", food: "Food", drinks: "Drink", potions: "Potion", protectionPotions: "Protection potion",
+    buffs: "Buff", utilities: "Engineering", reagents: "Reagent", chronoboon: "Chronoboon", special: "Other" };
+  var DUMMY_ICON = "Interface\\Icons\\INV_Crate_02";
+  function newCfg() { return { set: "", t1: 0, t2: 0, slots: {}, rems: [], desc: "" }; }
+  function cfgOf(r, i, field) {
+    picks[r.raid] = picks[r.raid] || {};
+    picks[r.raid][i] = picks[r.raid][i] || {};
+    return picks[r.raid][i][field] = picks[r.raid][i][field] || newCfg();
+  }
+  function itemName(id) {
+    var g = character ? character.gear.filter(function (x) { return x.id === id; })[0] : null; if (g) return g.name;
+    var u = character ? character.use.filter(function (x) { return x.id === id; })[0] : null; return u ? u.name : "item " + id;
+  }
+  // the step actions the game reads, from one cfg
+  function actionsOf(c) {
+    var a = {};
+    if (!c) return a;
+    if (c.set) a.gearSet = c.set;
+    if (c.t1) a.trinket1 = c.t1;
+    if (c.t2) a.trinket2 = c.t2;
+    if (Object.keys(c.slots).length) { a.slots = {}; Object.keys(c.slots).forEach(function (k) { a.slots[k] = c.slots[k]; }); }
+    var rems = c.rems.filter(function (x) { return x.text || x.itemId; }).map(function (x) {
+      var o = { text: x.text, itemId: x.itemId || null, tts: x.tts !== false };
+      if (x.itemId === "dummy") o.icon = DUMMY_ICON;
+      if (x.delay > 0) o.delay = x.delay;
+      if (!o.itemId) delete o.itemId;
+      return o;
+    });
+    if (rems.length) a.reminders = rems;
+    return a;
+  }
+  function hasCfg(c) { return !!c && (Object.keys(actionsOf(c)).length > 0 || !!c.desc); }
+  function summaryOf(c) {
+    if (!c) return [];
+    var out = [];
+    if (c.set) out.push("Gear set: " + c.set);
+    if (c.t1) out.push("Trinket 1: " + itemName(c.t1));
+    if (c.t2) out.push("Trinket 2: " + itemName(c.t2));
+    Object.keys(c.slots).forEach(function (k) { out.push(SLOT_NAME[k] + ": " + (c.slots[k] === -1 ? "empty" : itemName(c.slots[k]))); });
+    c.rems.forEach(function (x) { if (x.text) out.push("Reminder: " + x.text); });
+    return out;
+  }
+  // what was set on a step goes into that raid's route. kills step: fires
+  // once the pull is dead (its own actions). boss step: "when the boss is
+  // pulled" is a "start" step put before the kill; "after the kill" is the
+  // "end" step's own actions.
   function applyPicks(routes) {
     routes.forEach(function (r) {
       var pk = picks[r.raid] || {};
       var steps = [];
       r.steps.forEach(function (st, i) {
         var p = pk[i] || {};
+        if (st.baseDesc === undefined) st.baseDesc = st.desc || "";
         if (st.type === "kills") {
-          st.actions = st.actions || {};
-          if (p.then) st.actions.gearSet = p.then; else delete st.actions.gearSet;
+          st.actions = actionsOf(p.then);
+          st.desc = (p.then && p.then.desc) || st.baseDesc;
           steps.push(st);
         } else if (st.type === "encounter") {
-          if (p.pull) steps.push({ type: "encounter", boss: st.boss, when: "start", desc: "", actions: { gearSet: p.pull } });
-          st.actions = st.actions || {};
-          if (p.after) st.actions.gearSet = p.after; else delete st.actions.gearSet;
+          if (hasCfg(p.pull)) steps.push({ type: "encounter", boss: st.boss, when: "start", desc: "", actions: actionsOf(p.pull) });
+          st.actions = actionsOf(p.after);
+          st.desc = (p.after && p.after.desc) || st.baseDesc;
           steps.push(st);
         } else steps.push(st);
       });
@@ -857,21 +937,129 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     });
   }
   function rerender() { if (window.__lastRoutes) { applyPicks(window.__lastRoutes); render(window.__lastRoutes, true); } }
-  function setPicker(li, r, i, field, label, current) {
-    var wrap = document.createElement("span"); wrap.className = "pick";
-    wrap.appendChild(document.createTextNode(label));
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function selectEl(options, current, onPick) {
     var sel = document.createElement("select");
-    var none = document.createElement("option"); none.value = ""; none.textContent = field === "then" ? "no gear change" : "keep what I have on"; sel.appendChild(none);
-    character.sets.forEach(function (st) { var o = document.createElement("option"); o.value = st.name; o.textContent = st.name; if (st.name === current) o.selected = true; sel.appendChild(o); });
-    sel.onchange = function () {
-      picks[r.raid] = picks[r.raid] || {};
-      picks[r.raid][i] = picks[r.raid][i] || {};
-      picks[r.raid][i][field] = sel.value || null;
-      applyPicks(window.__lastRoutes);
+    options.forEach(function (o) { var e = document.createElement("option"); e.value = String(o.v); e.textContent = o.t; if (String(o.v) === String(current)) e.selected = true; sel.appendChild(e); });
+    sel.onchange = function () { onPick(sel.value, sel); };
+    return sel;
+  }
+  function fieldRow(panel, label) { var row = el("div", "frow"); row.appendChild(el("span", "flabel", label)); var f = el("span", "field"); row.appendChild(f); panel.appendChild(row); return f; }
+  // one context of a step (a kills step, or a boss's pull / after-kill)
+  function section(panel, r, i, field, title, changed) {
+    var c = cfgOf(r, i, field);
+    if (title) panel.appendChild(el("div", "ftitle", title));
+    var isBoss = field !== "then";
+    // Gear set
+    var f = fieldRow(panel, "Gear set:");
+    f.appendChild(selectEl([{ v: "", t: "None (don't swap)" }].concat(character.sets.map(function (st) { return { v: st.name, t: st.name }; })), c.set,
+      function (v) { c.set = v; changed(); }));
+    if (isBoss) f.appendChild(el("span", "fnote", "Shared with Raid Config - one setting, both places."));
+    // Trinkets
+    var trinkets = character.gear.filter(function (g) { return g.slots.indexOf(13) >= 0; });
+    var tOpts = function () { return [{ v: 0, t: "None" }].concat(trinkets.map(function (g) { return { v: g.id, t: g.name }; })); };
+    fieldRow(panel, "Trinket 1:").appendChild(selectEl(tOpts(), c.t1, function (v) { c.t1 = Number(v) || 0; changed(); }));
+    fieldRow(panel, "Trinket 2:").appendChild(selectEl(tOpts(), c.t2, function (v) { c.t2 = Number(v) || 0; changed(); }));
+    // Slot gear: a slot, then an item that fits it
+    f = fieldRow(panel, "Slot gear:");
+    var slotSel = selectEl(SLOT_LIST.map(function (e) { return { v: e[0], t: e[1] }; }), 1, function () { fillItems(); });
+    var itemSel = document.createElement("select");
+    var list = el("div", "chips");
+    function fillItems() {
+      var slot = Number(slotSel.value);
+      var opts = [{ v: "", t: "Pick an item..." }, { v: -1, t: "(Unequip - leave slot empty)" }];
+      character.gear.forEach(function (g) { if (g.slots.indexOf(slot) >= 0) opts.push({ v: g.id, t: g.name }); });
+      itemSel.textContent = "";
+      opts.forEach(function (o) { var e = document.createElement("option"); e.value = String(o.v); e.textContent = o.t; itemSel.appendChild(e); });
+    }
+    itemSel.onchange = function () {
+      if (!itemSel.value) return;
+      c.slots[Number(slotSel.value)] = Number(itemSel.value);
+      // move on to the next slot with nothing set, like the game does
+      for (var k = 0; k < SLOT_LIST.length; k++) { if (!c.slots[SLOT_LIST[k][0]]) { slotSel.value = String(SLOT_LIST[k][0]); break; } }
+      fillItems(); drawSlots(); changed();
     };
-    wrap.appendChild(sel);
-    li.appendChild(wrap);
-    return wrap;
+    fillItems();
+    f.appendChild(slotSel); f.appendChild(itemSel);
+    function drawSlots() {
+      list.textContent = "";
+      SLOT_LIST.forEach(function (e) {
+        var id = c.slots[e[0]]; if (!id) return;
+        var chip = el("span", "chip", e[1] + ": " + (id === -1 ? "empty" : itemName(id)));
+        var x = el("span", null, "x"); x.title = "remove"; x.onclick = function () { delete c.slots[e[0]]; drawSlots(); changed(); };
+        chip.appendChild(x); list.appendChild(chip);
+      });
+    }
+    drawSlots();
+    fieldRow(panel, "").appendChild(list);
+    // Reminders
+    f = fieldRow(panel, "Reminders:");
+    var remList = el("div", "rems"); f.appendChild(remList);
+    function drawRems() {
+      remList.textContent = "";
+      c.rems.forEach(function (x, k) {
+        var row = el("div", "rem");
+        var t = document.createElement("input"); t.type = "text"; t.value = x.text; t.placeholder = "reminder text"; t.maxLength = 80;
+        t.oninput = function () { x.text = t.value; changed(); };
+        row.appendChild(t);
+        var cb = el("label", "cb"); var ck = document.createElement("input"); ck.type = "checkbox"; ck.checked = x.tts !== false;
+        ck.onchange = function () { x.tts = ck.checked; changed(); }; cb.appendChild(ck); cb.appendChild(document.createTextNode("TTS")); row.appendChild(cb);
+        var d = document.createElement("input"); d.type = "number"; d.min = 0; d.max = 600; d.value = x.delay || 0; d.className = "delay";
+        d.onchange = function () { var n = Math.floor(Number(d.value) || 0); if (n < 0) n = 0; if (n > 600) n = 600; d.value = n; x.delay = n; changed(); };
+        row.appendChild(d); row.appendChild(el("span", "fnote", "s late"));
+        var xx = el("span", "x", "x"); xx.title = "remove"; xx.onclick = function () { c.rems.splice(k, 1); drawRems(); changed(); }; row.appendChild(xx);
+        remList.appendChild(row);
+      });
+      var add = el("div", "rem");
+      var useOpts = [{ v: "", t: "Add: pick item..." }, { v: "dummy", t: "Target Dummy" }].concat(character.use.map(function (u) { return { v: u.id, t: (CAT_NAME[u.cat] ? CAT_NAME[u.cat] + ": " : "") + u.name }; }));
+      add.appendChild(selectEl(useOpts, "", function (v) {
+        if (!v) return;
+        if (v === "dummy") c.rems.push({ text: "Use Target Dummy", itemId: "dummy", tts: true, delay: 0 });
+        else c.rems.push({ text: "Use " + itemName(Number(v)), itemId: Number(v), tts: true, delay: 0 });
+        drawRems(); changed();
+      }));
+      var tb = el("button", "small", "+ Text"); tb.type = "button"; tb.onclick = function () { c.rems.push({ text: "", itemId: null, tts: true, delay: 0 }); drawRems(); changed(); var ins = remList.querySelectorAll("input[type=text]"); if (ins.length) ins[ins.length - 1].focus(); };
+      add.appendChild(tb);
+      add.appendChild(el("span", "fnote", "Item reminders clear when used"));
+      remList.appendChild(add);
+    }
+    drawRems();
+    // Label (the step's own name in the route)
+    if (field !== "pull") {
+      var lab = document.createElement("input"); lab.type = "text"; lab.value = c.desc; lab.maxLength = 60; lab.placeholder = "optional - shown instead of the mob list";
+      lab.oninput = function () { c.desc = lab.value; changed(); };
+      fieldRow(panel, "Label:").appendChild(lab);
+    }
+  }
+  // the "edit" link and summary on a step, and the editor under it
+  function stepEditor(li, r, i, s) {
+    var pk = (picks[r.raid] || {})[i] || {};
+    var line = el("span", "cfgline");
+    var sum = el("span", "sum");
+    var link = el("span", "more", pk.open ? "done" : "edit");
+    line.appendChild(link); line.appendChild(sum);
+    li.appendChild(line);
+    var panel = el("div", "cfg"); panel.hidden = !pk.open;
+    function refresh() {
+      var parts = [];
+      if (s.type === "kills") parts = summaryOf(pk.then);
+      else { summaryOf(pk.pull).forEach(function (t) { parts.push("Pull - " + t); }); summaryOf(pk.after).forEach(function (t) { parts.push("After - " + t); }); }
+      sum.textContent = parts.length ? parts.join(" | ") : "";
+      applyPicks(window.__lastRoutes);
+    }
+    link.onclick = function () {
+      pk = picks[r.raid] = picks[r.raid] || {}; pk = pk[i] = pk[i] || {};
+      pk.open = panel.hidden; panel.hidden = !pk.open; link.textContent = pk.open ? "done" : "edit";
+      if (pk.open && !panel.childNodes.length) build();
+    };
+    function build() {
+      if (s.type === "kills") section(panel, r, i, "then", null, refresh);
+      else { section(panel, r, i, "pull", "When " + s.boss + " is pulled", refresh); section(panel, r, i, "after", "After the kill", refresh); }
+    }
+    pk = picks[r.raid] && picks[r.raid][i] || {};
+    if (pk.open) build();
+    li.appendChild(panel);
+    refresh();
   }
   function render(routes, keepScroll) {
     var out = $("out"); out.textContent = "";
@@ -907,11 +1095,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
           rest.textContent = " (with " + s.dropped.map(function (m) { return m.kills + "x " + m.mob; }).join(", ") + ")";
           li.appendChild(rest);
         }
-        if (character && character.sets.length) {
-          var p = (picks[r.raid] || {})[i] || {};
-          if (s.type === "kills") setPicker(li, r, i, "then", "After this pull, wear:", p.then);
-          else { setPicker(li, r, i, "pull", "For this boss, wear:", p.pull); setPicker(li, r, i, "after", "After the kill, wear:", p.after); }
-        }
+        if (character) stepEditor(li, r, i, s);
         ol.appendChild(li);
       });
       box.appendChild(ol);
