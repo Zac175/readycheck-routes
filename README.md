@@ -4,8 +4,7 @@ Turn a Warcraft Logs report into a raid route for the Readycheck addon (WoW Clas
 
 **Use it:** https://zac175.github.io/readycheck-routes/
 
-1. Sign in with Warcraft Logs (read-only).
-2. Paste a report link and click **Make my route**.
-3. Click **Copy** on the raid, then in game: `/rc` > the raid > **Route** > **From Logs** > **Paste Route**.
+1. Paste a public report link and click **Make my route**. No sign-in needed.
+2. Click **Copy** on the raid, then in game: `/rc` > the raid > **Route** > **From Logs** > **Paste Route**.
 
-The page runs entirely in your browser. It talks only to Warcraft Logs, and your sign-in stays in your browser.
+Reports are read through a small read-only relay that holds the Warcraft Logs app key, so players never have to sign in.

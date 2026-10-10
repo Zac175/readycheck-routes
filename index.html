@@ -42,23 +42,11 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 <body>
 <main>
 <h1>Readycheck Routes</h1>
-<p class="lede">Turn a Warcraft Logs report into a Readycheck raid route: every trash pull in the order you did it, how many of each mob died, and each boss kill. Works for Molten Core, Blackwing Lair, Ahn'Qiraj and Naxxramas.</p>
+<p class="lede">Turn a Warcraft Logs report into a Readycheck raid route: every trash pull in the order you did it, how many of each mob died, and each boss kill. Works for Molten Core, Blackwing Lair, Ahn'Qiraj and Naxxramas. No sign-in needed - paste a public report link and go.</p>
 
-<section id="signin">
-<h2>1. Sign in</h2>
-<div id="signedOut">
-<p>Warcraft Logs asks you to sign in once so this page can read reports. It only reads; it never posts or changes anything.</p>
-<button class="go" id="login">Sign in with Warcraft Logs</button>
-</div>
-<div id="signedIn" hidden>
-<p class="ok">Signed in to Warcraft Logs.</p>
-<button id="logout">Sign out</button>
-</div>
-<p class="err" id="signinErr" hidden></p>
-</section>
 
 <section>
-<h2>2. Your report</h2>
+<h2>1. Your report</h2>
 <input type="text" id="link" placeholder="Paste the report link, e.g. https://fresh.warcraftlogs.com/reports/..." autocomplete="off" spellcheck="false">
 <details>
 <summary>Options</summary>
@@ -70,7 +58,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 </section>
 
 <section id="results" hidden>
-<h2>3. Take it into the game</h2>
+<h2>2. Take it into the game</h2>
 <ol class="steps">
 <li>Click <b>Copy</b> on the raid below.</li>
 <li>In game, open Readycheck (<b>/rc</b>), pick the raid, go to <b>Route</b> and click <b>From Logs</b>.</li>
@@ -330,105 +318,44 @@ var RouteCore = (function () {
 if (typeof module !== "undefined") module.exports = RouteCore;
 
 var RAID_MOBS = {"Naxxramas":["Bile Retcher","Bony Construct","Carrion Spinner","Crypt Guard","Crypt Reaver","Dark Touched Warrior","Death Lord","Death Touched Warrior","Deathknight","Deathknight Captain","Deathknight Cavalier","Deathknight Understudy","Deathknight Vindicator","Diseased Maggot","Doom Touched Warrior","Dread Creeper","Embalming Slime","Eye Stalk","Frenzied Bat","Infectious Ghoul","Infectious Skitterer","Living Monstrosity","Mad Scientist","Mutated Grub","Naxxramas Acolyte","Naxxramas Cultist","Naxxramas Follower","Naxxramas Worshipper","Necro Knight","Necro Knight Guardian","Necro Stalker","Necropolis Acolyte","Patchwork Golem","Plague Beast","Plague Slime","Plagued Bat","Plagued Deathhound","Plagued Gargoyle","Plagued Ghoul","Risen Deathknight","Rotting Maggot","Shade of Naxxramas","Skeletal Smith","Skeletal Steed","Sludge Belcher","Spirit of Naxxramas","Stitched Spewer","Stoneskin Gargoyle","Surgical Assistant","Tomb Horror","Unholy Axe","Unholy Staff","Unholy Swords","Venom Stalker"],"Blackwing Lair":["Blackwing Guardsman","Blackwing Spellbinder","Blackwing Taskmaster","Blackwing Technician","Blackwing Warlock","Corrupted Blue Whelp","Corrupted Bronze Whelp","Corrupted Green Whelp","Corrupted Red Whelp","Death Talon Captain","Death Talon Flamescale","Death Talon Hatcher","Death Talon Overseer","Death Talon Seether","Death Talon Wyrmguard","Death Talon Wyrmkin","Grethok the Controller","Master Elemental Shaper Krixix"],"Molten Core":["Ancient Core Hound","Core Hound","Core Rager","Firelord","Firesworn","Firewalker","Flame Imp","Flameguard","Flamewaker","Flamewaker Priest","Flamewaker Protector","Lava Annihilator","Lava Elemental","Lava Reaver","Lava Surger","Molten Destroyer","Molten Giant"],"Temple of Ahn'Qiraj":["Anubisath Defender","Anubisath Sentinel","Anubisath Warder","Obsidian Eradicator","Obsidian Nullifier","Ouro Spawner","Qiraji Brainwasher","Qiraji Champion","Qiraji Lasher","Qiraji Mindslayer","Qiraji Scarab","Qiraji Scorpion","Qiraji Slayer","Sartura's Royal Guard","Vekniss Drone","Vekniss Guardian","Vekniss Hive Crawler","Vekniss Soldier","Vekniss Stinger","Vekniss Warrior","Vekniss Wasp"]};
-// The Warcraft Logs app this page signs in as (a public "PKCE" client, so
-// there is no secret). Its redirect URL must be this page's address.
-var WCL_CLIENT_ID = "01a12339-d4da-7075-b0de-b2a248992a1f";
+// Reports are read through the Readycheck relay, which holds the
+// Warcraft Logs app key, so nobody has to sign in. It only reads.
+var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  function get(store, k) { try { return window[store].getItem(k); } catch (e) { return null; } }
-  function set(store, k, v) { try { if (v == null) window[store].removeItem(k); else window[store].setItem(k, v); } catch (e) {} }
-  var memToken = null;
-  var REDIRECT = location.origin + location.pathname;
-
-  function token() {
-    if (memToken) return memToken;
-    var raw = get("localStorage", "rcroutes.token");
-    if (!raw) return null;
-    try {
-      var t = JSON.parse(raw);
-      if (t && t.access_token && (!t.expires_at || t.expires_at > Date.now() + 60000)) return (memToken = t.access_token);
-    } catch (e) {}
-    set("localStorage", "rcroutes.token", null);
-    return null;
-  }
-  function showSignedIn() {
-    var on = !!token();
-    $("signedOut").hidden = on;
-    $("signedIn").hidden = !on;
-  }
-  function signinError(msg) { var e = $("signinErr"); e.textContent = msg; e.hidden = !msg; }
+  var SITES = { www: 1, classic: 1, fresh: 1, vanilla: 1, sod: 1 };
   function status(msg, cls) { var s = $("status"); s.className = cls || "hint"; s.textContent = msg; }
 
-  // ---- signing in: OAuth with PKCE (no secret on the page)
-  function b64url(bytes) {
-    var s = ""; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-  function randomString(n) { var a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
-  function login() {
-    if (!WCL_CLIENT_ID || WCL_CLIENT_ID.indexOf("CLIENT_ID") >= 0) { signinError("This page is not set up yet (no Warcraft Logs app)."); return; }
-    var verifier = randomString(48), state = randomString(16);
-    crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)).then(function (hash) {
-      set("sessionStorage", "rcroutes.verifier", verifier);
-      set("sessionStorage", "rcroutes.state", state);
-      set("sessionStorage", "rcroutes.link", $("link").value.trim());
-      location.href = RouteCore.AUTHORIZE_URL + "?" + new URLSearchParams({
-        client_id: WCL_CLIENT_ID, response_type: "code", redirect_uri: REDIRECT, state: state,
-        code_challenge: b64url(new Uint8Array(hash)), code_challenge_method: "S256"
-      }).toString();
-    });
-  }
-  function finishLogin() {
-    var q = new URLSearchParams(location.search);
-    if (!q.has("code") && !q.has("error")) return Promise.resolve();
-    history.replaceState(null, "", REDIRECT);
-    var link = get("sessionStorage", "rcroutes.link");
-    if (link) $("link").value = link;
-    if (q.has("error")) { signinError("Sign-in was cancelled."); return Promise.resolve(); }
-    if (q.get("state") !== get("sessionStorage", "rcroutes.state")) { signinError("Sign-in did not match - please try again."); return Promise.resolve(); }
-    var verifier = get("sessionStorage", "rcroutes.verifier");
-    set("sessionStorage", "rcroutes.verifier", null);
-    set("sessionStorage", "rcroutes.state", null);
-    return fetch(RouteCore.TOKEN_URL, {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "authorization_code", client_id: WCL_CLIENT_ID, code: q.get("code"),
-        redirect_uri: REDIRECT, code_verifier: verifier || "" }).toString()
-    }).then(function (r) {
-      if (!r.ok) throw new Error("Warcraft Logs did not finish the sign-in (" + r.status + "). Please try again.");
-      return r.json();
-    }).then(function (t) {
-      memToken = t.access_token;
-      set("localStorage", "rcroutes.token", JSON.stringify({ access_token: t.access_token,
-        expires_at: t.expires_in ? Date.now() + t.expires_in * 1000 : 0 }));
-      signinError("");
-    }).catch(function (e) { signinError(e.message || "Sign-in failed. Please try again."); });
-  }
-  $("login").onclick = login;
-  $("logout").onclick = function () { memToken = null; set("localStorage", "rcroutes.token", null); showSignedIn(); };
-
-  // ---- reading the report
-  function gql(api, query, vars) {
-    return fetch(api, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token() },
-      body: JSON.stringify({ query: query, variables: vars }) })
+  // ---- reading the report (ask: "report" or "deaths")
+  function gql(ask, p, extra) {
+    var body = { ask: ask, site: SITES[p.host] ? p.host : "www", code: p.code };
+    if (extra) { body.start = extra.start; body.end = extra.end; }
+    return fetch(RELAY_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       .then(function (r) {
-        if (r.status === 401) { memToken = null; set("localStorage", "rcroutes.token", null); showSignedIn(); throw new Error("Your sign-in ran out - click Sign in again."); }
-        if (!r.ok) throw new Error("Warcraft Logs answered " + r.status + " - try again in a moment.");
+        if (r.status === 429) throw new Error("Warcraft Logs is busy right now - wait a minute and try again.");
+        if (!r.ok) throw new Error("Could not read the report (" + r.status + ") - try again in a moment.");
         return r.json();
       }, function () { throw new Error("Could not reach Warcraft Logs - check your connection and try again."); })
-      .then(function (j) { if (j.errors && j.errors.length) throw new Error(j.errors[0].message); return j.data; });
+      .then(function (j) {
+        if (j.errors && j.errors.length) {
+          var m = String(j.errors[0].message || "");
+          if (/permission|private|not exist|does not exist/i.test(m)) throw new Error("That report is private or deleted - only public reports can be read.");
+          throw new Error(m);
+        }
+        return j.data;
+      });
   }
   function fetchReport(p) {
-    var api = RouteCore.apiUrl(p.host);
     status("Reading the report...");
-    return gql(api, RouteCore.Q_REPORT, { code: p.code }).then(function (d) {
+    return gql("report", p).then(function (d) {
       var report = d.reportData && d.reportData.report;
       if (!report) throw new Error("No report with that link - is it private, or deleted?");
       var end = 0; report.fights.forEach(function (f) { if (f.endTime > end) end = f.endTime; });
       var deaths = [];
       function page(start) {
         status("Counting kills... " + deaths.length);
-        return gql(api, RouteCore.Q_DEATHS, { code: p.code, start: start, end: end }).then(function (d2) {
+        return gql("deaths", p, { start: start, end: end }).then(function (d2) {
           var ev = d2.reportData.report.events;
           deaths = deaths.concat(ev.data || []);
           if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return page(ev.nextPageTimestamp);
@@ -471,7 +398,6 @@ var WCL_CLIENT_ID = "01a12339-d4da-7075-b0de-b2a248992a1f";
   $("make").onclick = function () {
     var p = RouteCore.parseLink($("link").value);
     if (!p) { status("Paste the whole report link - it starts with https:// and has /reports/ in it.", "err"); return; }
-    if (!token()) { status("Sign in first (step 1) - your link is kept.", "err"); $("signin").scrollIntoView({ behavior: "smooth" }); return; }
     var opts = { bosses: $("optBoss").checked, standingOnly: $("optStanding").checked, numberPulls: $("optNumber").checked };
     $("make").disabled = true;
     fetchReport(p).then(function (data) { render(RouteCore.buildRoutes(data, RAID_MOBS, opts)); })
@@ -481,7 +407,6 @@ var WCL_CLIENT_ID = "01a12339-d4da-7075-b0de-b2a248992a1f";
   // a link handed to the page (?report=...) is filled in
   var pre = new URLSearchParams(location.search).get("report");
   if (pre) $("link").value = pre;
-  finishLogin().then(showSignedIn);
 })();
 </script>
 </body>
