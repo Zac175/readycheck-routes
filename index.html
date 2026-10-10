@@ -33,6 +33,8 @@ button:disabled{opacity:.5;cursor:default}
 .raid h3{margin:0 0 4px;font-size:16px}
 .raid ol{margin:8px 0;padding-left:30px;max-height:280px;overflow:auto;font-size:14px}
 .raid li.boss{color:var(--gold)}
+.raid li .tag{margin-left:8px;padding:0 6px;border:1px solid var(--accent);color:var(--accent);font-size:12px}
+.raid .note{color:var(--accent);margin:6px 0 2px}
 details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px}
 .steps{margin:0;padding-left:22px}
 .steps li{margin:4px 0}
@@ -52,6 +54,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 <summary>Options</summary>
 <label class="check"><input type="checkbox" id="optBoss" checked> A step for each boss kill (wipes are left out)</label>
 <label class="check"><input type="checkbox" id="optStanding" checked> Only count mobs that stand in the raid, not ones summoned during a pull</label>
+<label class="check"><input type="checkbox" id="optSplit" checked> Split packs that were pulled back to back (a 20 second gap between kills counts as the next pack)</label>
 <label class="check"><input type="checkbox" id="optNumber"> Name each trash step "Pull 1", "Pull 2"...</label>
 </details>
 <div class="row" style="margin-top:14px"><button class="go" id="make">Make my route</button><span id="status" class="hint"></span></div>
@@ -148,11 +151,16 @@ var RouteCore = (function () {
   // Turns a report (+ its enemy deaths, when there are any) into one
   // route per raid. data = { report, deaths }, raidMobs = { raid: [names] }
   // opts: { bosses (true), standingOnly (true), numberPulls (false),
-  //         minKills (1) }
+  //         minKills (1), splitChains (true), splitGap (20000 ms) }
+  // splitChains: Warcraft Logs only starts a new trash fight when the
+  // raid leaves combat, so packs pulled back to back share one fight.
+  // A pause of splitGap or more between two kills inside one fight is
+  // taken as the next pack; those steps carry split = true.
   function buildRoutes(data, raidMobs, opts) {
     opts = opts || {};
     var bosses = opts.bosses !== false, standingOnly = opts.standingOnly !== false;
     var minKills = opts.minKills || 1;
+    var splitChains = opts.splitChains !== false, splitGap = opts.splitGap || 20000;
     var report = data && data.report;
     if (!report || !Array.isArray(report.fights)) throw new Error("That is not a Warcraft Logs report - the fights are missing.");
     var actors = {};
@@ -178,8 +186,7 @@ var RouteCore = (function () {
           }
         }
         if (fid == null) return;
-        var m = deathsBy[fid] || (deathsBy[fid] = {});
-        m[a.name] = (m[a.name] || 0) + 1;
+        (deathsBy[fid] || (deathsBy[fid] = [])).push({ name: a.name, t: ev.timestamp || 0 });
       });
     }
 
@@ -192,9 +199,16 @@ var RouteCore = (function () {
         return;
       }
       if (f.encounterID) return;   // a boss from somewhere else
-      var counts = {};
+      var counts = {}, groups = null;
       if (haveDeaths) {
-        counts = deathsBy[f.id] || {};
+        var list = (deathsBy[f.id] || []).slice().sort(function (x, y) { return x.t - y.t; });
+        groups = [{}];
+        list.forEach(function (d, i) {
+          if (splitChains && i > 0 && d.t - list[i - 1].t >= splitGap) groups.push({});
+          var g = groups[groups.length - 1];
+          g[d.name] = (g[d.name] || 0) + 1;
+          counts[d.name] = (counts[d.name] || 0) + 1;
+        });
       } else {
         (f.enemyNPCs || []).forEach(function (e) {
           var a = actors[e.id];
@@ -207,7 +221,7 @@ var RouteCore = (function () {
         if (r) votes[r] = (votes[r] || 0) + counts[n];
       });
       Object.keys(votes).forEach(function (r) { if (!best || votes[r] > votes[best]) best = r; });
-      rows.push({ fight: f, raid: best, counts: counts });
+      rows.push({ fight: f, raid: best, counts: counts, groups: groups });
     });
     // trash that named no raid takes the raid of the boss after it, else before it
     rows.forEach(function (row, i) {
@@ -231,24 +245,34 @@ var RouteCore = (function () {
         out.bossKills++;
         return;
       }
-      var mobs = [];
-      Object.keys(row.counts).forEach(function (n) {
-        if (standingOnly && raidOfName[n.toLowerCase()] !== row.raid) return;
-        mobs.push({ mob: n, kills: row.counts[n] });
+      var made = [];
+      (row.groups || [row.counts]).forEach(function (counts) {
+        var mobs = [];
+        Object.keys(counts).forEach(function (n) {
+          if (standingOnly && raidOfName[n.toLowerCase()] !== row.raid) return;
+          mobs.push({ mob: n, kills: counts[n] });
+        });
+        var total = mobs.reduce(function (t, m) { return t + m.kills; }, 0);
+        if (total < minKills || mobs.length === 0) return;
+        mobs.sort(function (a, b) { return b.kills - a.kills || (a.mob < b.mob ? -1 : 1); });
+        made.push({ mobs: mobs, total: total });
       });
-      var total = mobs.reduce(function (t, m) { return t + m.kills; }, 0);
-      if (total < minKills || mobs.length === 0) return;
-      mobs.sort(function (a, b) { return b.kills - a.kills || (a.mob < b.mob ? -1 : 1); });
-      pullNo[row.raid] = (pullNo[row.raid] || 0) + 1;
-      out.steps.push({ type: "kills", mobs: mobs, desc: opts.numberPulls ? ("Pull " + pullNo[row.raid]) : "", actions: {} });
-      out.kills += total;
-      out.pulls++;
+      made.forEach(function (m) {
+        pullNo[row.raid] = (pullNo[row.raid] || 0) + 1;
+        var step = { type: "kills", mobs: m.mobs, desc: opts.numberPulls ? ("Pull " + pullNo[row.raid]) : "", actions: {} };
+        out.steps.push(step);
+        if (made.length > 1) { out.split = (out.split || 0) + 1; out.splitSteps = out.splitSteps || []; out.splitSteps.push(step); }
+        out.kills += m.total;
+        out.pulls++;
+      });
+      if (made.length > 1) out.chains = (out.chains || 0) + 1;
     });
 
     return RAID_ORDER.filter(function (r) { return byRaid[r] && byRaid[r].steps.length > 0; })
       .map(function (r) {
         var o = byRaid[r];
         o.text = "WRROUTE1\n" + r + "\n" + toLua({ fromLogs: true, source: (report.title || "Warcraft Logs"), steps: o.steps });
+        (o.splitSteps || []).forEach(function (st) { st.split = true; });
         return o;
       });
   }
@@ -384,8 +408,20 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
       var sum = document.createElement("div"); sum.className = "hint";
       sum.textContent = pl(r.pulls, "trash pull", "trash pulls") + " (" + pl(r.kills, "kill", "kills") + "), " + pl(r.bossKills, "boss", "bosses");
       box.appendChild(sum);
+      if (r.chains) {
+        var note = document.createElement("div"); note.className = "note";
+        note.textContent = pl(r.chains, "fight was a chain pull", "fights were chain pulls") + " (packs pulled back to back) and " +
+          (r.chains === 1 ? "was" : "were") + " split into " + pl(r.split, "step", "steps") + ", marked \"split\" below. " +
+          "Check those look like separate packs; if a slow pack got cut in two, untick the split option under Options and make the route again.";
+        box.appendChild(note);
+      }
       var ol = document.createElement("ol");
-      r.steps.forEach(function (s) { var li = document.createElement("li"); li.textContent = RouteCore.stepText(s); if (s.type === "encounter") li.className = "boss"; ol.appendChild(li); });
+      r.steps.forEach(function (s) {
+        var li = document.createElement("li"); li.textContent = RouteCore.stepText(s);
+        if (s.type === "encounter") li.className = "boss";
+        if (s.split) { var tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "split"; li.appendChild(tag); }
+        ol.appendChild(li);
+      });
       box.appendChild(ol);
       var b = document.createElement("button"); b.className = "go"; b.textContent = "Copy " + r.raid + " route";
       b.onclick = function () { copy(r.text, b); }; box.appendChild(b);
@@ -398,7 +434,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
   $("make").onclick = function () {
     var p = RouteCore.parseLink($("link").value);
     if (!p) { status("Paste the whole report link - it starts with https:// and has /reports/ in it.", "err"); return; }
-    var opts = { bosses: $("optBoss").checked, standingOnly: $("optStanding").checked, numberPulls: $("optNumber").checked };
+    var opts = { bosses: $("optBoss").checked, standingOnly: $("optStanding").checked, numberPulls: $("optNumber").checked, splitChains: $("optSplit").checked };
     $("make").disabled = true;
     fetchReport(p).then(function (data) { render(RouteCore.buildRoutes(data, RAID_MOBS, opts)); })
       .catch(function (e) { status(e.message || String(e), "err"); })
