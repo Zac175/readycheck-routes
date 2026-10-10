@@ -152,7 +152,7 @@ var RouteCore = (function () {
   // route per raid. data = { report, deaths }, raidMobs = { raid: [names] }
   // opts: { bosses (true), standingOnly (true), numberPulls (false),
   //         minKills (1), splitChains (true), splitGap (20000 ms),
-  //         packDistance (90 yards) }
+  //         packDistance (90 yards), overlapSlack (2000 ms) }
   // splitChains: Warcraft Logs only starts a new trash fight when the
   // raid leaves combat, so packs pulled back to back share one fight.
   // With kill positions (data.kills) and the raid map's packs
@@ -166,6 +166,7 @@ var RouteCore = (function () {
     var minKills = opts.minKills || 1;
     var splitChains = opts.splitChains !== false, splitGap = opts.splitGap || 20000;
     var packDistance = opts.packDistance || 90;
+    var overlapSlack = opts.overlapSlack != null ? opts.overlapSlack : 2000;
     var report = data && data.report;
     if (!report || !Array.isArray(report.fights)) throw new Error("That is not a Warcraft Logs report - the fights are missing.");
     var actors = {};
@@ -323,12 +324,30 @@ var RouteCore = (function () {
         var byPack = {}, order = [];
         list.forEach(function (d) {
           var g = byPack[d.pack];
-          if (!g) { g = byPack[d.pack] = { counts: {}, first: d.t, pack: I.packs[d.pack] }; order.push(g); }
+          if (!g) { g = byPack[d.pack] = { counts: {}, first: d.t, last: d.t, n: 0, pack: I.packs[d.pack] }; order.push(g); }
           g.counts[d.name] = (g.counts[d.name] || 0) + 1;
+          g.last = d.t;
+          g.n++;
         });
         list.forEach(function (d) { delete d._loose; });
         order.sort(function (a, b) { return a.first - b.first; });
-        return order;
+        // packs whose kills overlap in time were pulled together: one step.
+        // Only a pack that starts dying after the one before it is done is
+        // a pack of its own.
+        var merged = [];
+        order.forEach(function (g) {
+          var cur = merged[merged.length - 1];
+          if (cur && g.first <= cur.last + overlapSlack) {
+            Object.keys(g.counts).forEach(function (n) { cur.counts[n] = (cur.counts[n] || 0) + g.counts[n]; });
+            if (g.last > cur.last) cur.last = g.last;
+            if (g.n > cur.bigN) { cur.bigN = g.n; cur.pack = g.pack; }
+            cur.n += g.n;
+          } else {
+            g.bigN = g.n;
+            merged.push(g);
+          }
+        });
+        return merged;
       }
       var groups = [{ counts: {} }];
       list.forEach(function (d, i) {
