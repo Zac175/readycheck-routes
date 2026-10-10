@@ -880,6 +880,16 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     $("results").hidden = false;
     status("Done.", "ok");
     if (!keepScroll) $("results").scrollIntoView({ behavior: "smooth" });
+    nameItems();
+  }
+  // Wowhead's script names and icons item links that were on the page
+  // when it loaded; links added later need a nudge (and a retry while
+  // the script is still on its way)
+  function nameItems(tries) {
+    tries = tries || 0;
+    var wh = window.$WowheadPower;
+    if (wh && wh.refreshLinks) { try { wh.refreshLinks(); } catch (e) {} return; }
+    if (tries < 20) setTimeout(function () { nameItems(tries + 1); }, 500);
   }
   $("make").onclick = function () {
     var p = RouteCore.parseLink($("link").value);
