@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Readycheck Routes</title>
+<style>
+:root{--bg:#141414;--panel:#1c1c1c;--panel2:#232323;--line:#000;--text:#e6e6e6;--muted:#9a9a9a;--gold:#ffd100;--accent:#d9a640;--green:#80cc80;--red:#ff6b6b;--field:#101010;--go:#2d4a30;--go2:#365a3a;--goline:#3e6b43}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]){--bg:#f3f1ec;--panel:#fff;--panel2:#f7f5f0;--line:#d8d2c4;--text:#1d1d1d;--muted:#666;--gold:#8a5f00;--accent:#b5821f;--green:#2e7d32;--red:#c62828;--field:#fff}}
+:root[data-theme="light"]{--bg:#f3f1ec;--panel:#fff;--panel2:#f7f5f0;--line:#d8d2c4;--text:#1d1d1d;--muted:#666;--gold:#8a5f00;--accent:#b5821f;--green:#2e7d32;--red:#c62828;--field:#fff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:820px;margin:0 auto;padding:28px 16px 56px}
+h1{font-size:24px;margin:0 0 4px;color:var(--gold)}
+h2{font-size:16px;margin:0 0 10px;color:var(--gold)}
+p{margin:0 0 10px}
+.lede{color:var(--muted);margin-bottom:22px}
+section{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);padding:18px;margin:0 0 14px}
+input[type=text],textarea{width:100%;background:var(--field);color:var(--text);border:1px solid var(--line);padding:10px 12px;font:14px ui-monospace,Consolas,monospace}
+textarea{min-height:70px;resize:vertical;font-size:12px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--line);padding:10px 18px;font:600 14px system-ui,sans-serif;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.go{background:var(--go);color:#fff;border-color:var(--goline)}
+button.go:hover{background:var(--go2)}
+button:disabled{opacity:.5;cursor:default}
+.check{display:flex;gap:8px;align-items:flex-start;margin:6px 0;font-size:14px}
+.check input{margin-top:4px}
+.hint{font-size:13px;color:var(--muted)}
+.err{color:var(--red);font-weight:600}
+.ok{color:var(--green);font-weight:600}
+.raid{background:var(--panel2);border:1px solid var(--line);padding:14px;margin-top:12px}
+.raid h3{margin:0 0 4px;font-size:16px}
+.raid ol{margin:8px 0;padding-left:30px;max-height:280px;overflow:auto;font-size:14px}
+.raid li.boss{color:var(--gold)}
+details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px}
+.steps{margin:0;padding-left:22px}
+.steps li{margin:4px 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>Readycheck Routes</h1>
+<p class="lede">Turn a Warcraft Logs report into a Readycheck raid route: every trash pull in the order you did it, how many of each mob died, and each boss kill. Works for Molten Core, Blackwing Lair, Ahn'Qiraj and Naxxramas.</p>
+
+<section id="signin">
+<h2>1. Sign in</h2>
+<div id="signedOut">
+<p>Warcraft Logs asks you to sign in once so this page can read reports. It only reads; it never posts or changes anything.</p>
+<button class="go" id="login">Sign in with Warcraft Logs</button>
+</div>
+<div id="signedIn" hidden>
+<p class="ok">Signed in to Warcraft Logs.</p>
+<button id="logout">Sign out</button>
+</div>
+<p class="err" id="signinErr" hidden></p>
+</section>
+
+<section>
+<h2>2. Your report</h2>
+<input type="text" id="link" placeholder="Paste the report link, e.g. https://fresh.warcraftlogs.com/reports/..." autocomplete="off" spellcheck="false">
+<details>
+<summary>Options</summary>
+<label class="check"><input type="checkbox" id="optBoss" checked> A step for each boss kill (wipes are left out)</label>
+<label class="check"><input type="checkbox" id="optStanding" checked> Only count mobs that stand in the raid, not ones summoned during a pull</label>
+<label class="check"><input type="checkbox" id="optNumber"> Name each trash step "Pull 1", "Pull 2"...</label>
+</details>
+<div class="row" style="margin-top:14px"><button class="go" id="make">Make my route</button><span id="status" class="hint"></span></div>
+</section>
+
+<section id="results" hidden>
+<h2>3. Take it into the game</h2>
+<ol class="steps">
+<li>Click <b>Copy</b> on the raid below.</li>
+<li>In game, open Readycheck (<b>/rc</b>), pick the raid, go to <b>Route</b> and click <b>From Logs</b>.</li>
+<li>Click <b>Paste Route</b> and press <b>Ctrl+V</b>.</li>
+</ol>
+<p class="hint">This replaces that raid's route, but gear and reminders you set on your old steps are kept wherever they still fit.</p>
+<div id="out"></div>
+</section>
+</main>
+<script>
+// ---------------------------------------------------------------------
+// Readycheck - Route from Warcraft Logs: the part that does the work.
+// Kept free of the page so it can be tested on its own (node) and used
+// by anything that has the report's data.
+// ---------------------------------------------------------------------
+var RouteCore = (function () {
+  "use strict";
+
+  // Each boss as the route names it, by the game's encounter id.
+  var ENCOUNTERS = {
+    663: ["Molten Core", "Lucifron"], 664: ["Molten Core", "Magmadar"], 665: ["Molten Core", "Gehennas"],
+    666: ["Molten Core", "Garr"], 667: ["Molten Core", "Shazzrah"], 668: ["Molten Core", "Baron Geddon"],
+    669: ["Molten Core", "Sulfuron Harbinger"], 670: ["Molten Core", "Golemagg the Incinerator"],
+    671: ["Molten Core", "Majordomo Executus"], 672: ["Molten Core", "Ragnaros"],
+    610: ["Blackwing Lair", "Razorgore the Untamed"], 611: ["Blackwing Lair", "Vaelastrasz the Corrupt"],
+    612: ["Blackwing Lair", "Broodlord Lashlayer"], 613: ["Blackwing Lair", "Firemaw"],
+    614: ["Blackwing Lair", "Ebonroc"], 615: ["Blackwing Lair", "Flamegor"],
+    616: ["Blackwing Lair", "Chromaggus"], 617: ["Blackwing Lair", "Nefarian"],
+    709: ["Temple of Ahn'Qiraj", "The Prophet Skeram"], 710: ["Temple of Ahn'Qiraj", "Silithid Royalty"],
+    711: ["Temple of Ahn'Qiraj", "Battleguard Sartura"], 712: ["Temple of Ahn'Qiraj", "Fankriss the Unyielding"],
+    713: ["Temple of Ahn'Qiraj", "Viscidus"], 714: ["Temple of Ahn'Qiraj", "Princess Huhuran"],
+    715: ["Temple of Ahn'Qiraj", "Twin Emperors"], 716: ["Temple of Ahn'Qiraj", "Ouro"],
+    717: ["Temple of Ahn'Qiraj", "C'Thun"],
+    1107: ["Naxxramas", "Anub'Rekhan"], 1108: ["Naxxramas", "Gluth"], 1109: ["Naxxramas", "Gothik the Harvester"],
+    1110: ["Naxxramas", "Grand Widow Faerlina"], 1111: ["Naxxramas", "Grobbulus"],
+    1112: ["Naxxramas", "Heigan the Unclean"], 1113: ["Naxxramas", "Instructor Razuvious"],
+    1114: ["Naxxramas", "Kel'Thuzad"], 1115: ["Naxxramas", "Loatheb"], 1116: ["Naxxramas", "Maexxna"],
+    1117: ["Naxxramas", "Noth the Plaguebringer"], 1118: ["Naxxramas", "Patchwerk"],
+    1119: ["Naxxramas", "Sapphiron"], 1120: ["Naxxramas", "Thaddius"], 1121: ["Naxxramas", "Four Horsemen"]
+  };
+  // The same bosses by the names logs give their fights (other seasons
+  // can number encounters differently).
+  var BOSS_NAMES = {};
+  Object.keys(ENCOUNTERS).forEach(function (k) {
+    BOSS_NAMES[norm(ENCOUNTERS[k][1])] = ENCOUNTERS[k];
+  });
+  [["the four horsemen", "Naxxramas", "Four Horsemen"], ["bug trio", "Temple of Ahn'Qiraj", "Silithid Royalty"],
+   ["the bug trio", "Temple of Ahn'Qiraj", "Silithid Royalty"], ["twin emperors", "Temple of Ahn'Qiraj", "Twin Emperors"],
+   ["the twin emperors", "Temple of Ahn'Qiraj", "Twin Emperors"], ["prophet skeram", "Temple of Ahn'Qiraj", "The Prophet Skeram"],
+   ["razorgore", "Blackwing Lair", "Razorgore the Untamed"], ["vaelastrasz", "Blackwing Lair", "Vaelastrasz the Corrupt"],
+   ["majordomo", "Molten Core", "Majordomo Executus"], ["golemagg", "Molten Core", "Golemagg the Incinerator"]
+  ].forEach(function (r) { BOSS_NAMES[norm(r[0])] = [r[1], r[2]]; });
+
+  var RAID_ORDER = ["Molten Core", "Blackwing Lair", "Temple of Ahn'Qiraj", "Naxxramas"];
+
+  function norm(s) { return String(s || "").toLowerCase().replace(/^the\s+/, "").trim(); }
+
+  // A report link (any Warcraft Logs site) -> { host, code, fight }
+  function parseLink(text) {
+    var s = String(text || "").trim();
+    var m = s.match(/^https?:\/\/([a-z]+\.)?warcraftlogs\.com\/reports\/([A-Za-z0-9]{8,32})/i);
+    if (m) {
+      var fm = s.match(/[#?&]fight=(\d+|last)/);
+      return { host: (m[1] ? m[1].slice(0, -1) : "www").toLowerCase(), code: m[2], fight: fm ? fm[1] : null };
+    }
+    return null;
+  }
+
+  // signed-in calls go to /api/v2/user on the report's own site
+  function apiUrl(host) { return "https://" + (host || "www") + ".warcraftlogs.com/api/v2/user"; }
+  var TOKEN_URL = "https://www.warcraftlogs.com/oauth/token";
+  var AUTHORIZE_URL = "https://www.warcraftlogs.com/oauth/authorize";
+
+  var Q_REPORT = 'query($code:String!){reportData{report(code:$code){title startTime endTime zone{id name} ' +
+    'fights{id encounterID name kill startTime endTime enemyNPCs{id gameID instanceCount}} ' +
+    'masterData{actors(type:"NPC"){id gameID name petOwner}}}}}';
+  var Q_DEATHS = 'query($code:String!,$start:Float,$end:Float){reportData{report(code:$code){' +
+    'events(startTime:$start,endTime:$end,dataType:Deaths,hostilityType:Enemies,limit:10000){data nextPageTimestamp}}}}';
+
+  // Which raid a boss fight belongs to, and the route's name for its boss.
+  function bossOf(fight) {
+    if (fight.encounterID && ENCOUNTERS[fight.encounterID]) return ENCOUNTERS[fight.encounterID];
+    if (fight.encounterID && fight.name && BOSS_NAMES[norm(fight.name)]) return BOSS_NAMES[norm(fight.name)];
+    return null;
+  }
+
+  // Turns a report (+ its enemy deaths, when there are any) into one
+  // route per raid. data = { report, deaths }, raidMobs = { raid: [names] }
+  // opts: { bosses (true), standingOnly (true), numberPulls (false),
+  //         minKills (1) }
+  function buildRoutes(data, raidMobs, opts) {
+    opts = opts || {};
+    var bosses = opts.bosses !== false, standingOnly = opts.standingOnly !== false;
+    var minKills = opts.minKills || 1;
+    var report = data && data.report;
+    if (!report || !Array.isArray(report.fights)) throw new Error("That is not a Warcraft Logs report - the fights are missing.");
+    var actors = {};
+    ((report.masterData && report.masterData.actors) || []).forEach(function (a) { actors[a.id] = a; });
+    var raidOfName = {};
+    Object.keys(raidMobs || {}).forEach(function (raid) {
+      raidMobs[raid].forEach(function (n) { raidOfName[n.toLowerCase()] = raid; });
+    });
+    var fights = report.fights.slice().sort(function (a, b) { return a.startTime - b.startTime; });
+
+    // deaths per fight, by name
+    var deathsBy = {};
+    var haveDeaths = Array.isArray(data.deaths) && data.deaths.length > 0;
+    if (haveDeaths) {
+      data.deaths.forEach(function (ev) {
+        if (ev.type && ev.type !== "death") return;
+        var a = actors[ev.targetID];
+        if (!a || a.petOwner) return;
+        var fid = ev.fight;
+        if (fid == null) {
+          for (var i = 0; i < fights.length; i++) {
+            if (ev.timestamp >= fights[i].startTime && ev.timestamp <= fights[i].endTime) { fid = fights[i].id; break; }
+          }
+        }
+        if (fid == null) return;
+        var m = deathsBy[fid] || (deathsBy[fid] = {});
+        m[a.name] = (m[a.name] || 0) + 1;
+      });
+    }
+
+    // fights in order, each with its raid
+    var rows = [];
+    fights.forEach(function (f) {
+      var b = bossOf(f);
+      if (f.encounterID && b) {
+        rows.push({ fight: f, raid: b[0], boss: b[1] });
+        return;
+      }
+      if (f.encounterID) return;   // a boss from somewhere else
+      var counts = {};
+      if (haveDeaths) {
+        counts = deathsBy[f.id] || {};
+      } else {
+        (f.enemyNPCs || []).forEach(function (e) {
+          var a = actors[e.id];
+          if (a && !a.petOwner) counts[a.name] = (counts[a.name] || 0) + (e.instanceCount || 1);
+        });
+      }
+      var votes = {}, best = null;
+      Object.keys(counts).forEach(function (n) {
+        var r = raidOfName[n.toLowerCase()];
+        if (r) votes[r] = (votes[r] || 0) + counts[n];
+      });
+      Object.keys(votes).forEach(function (r) { if (!best || votes[r] > votes[best]) best = r; });
+      rows.push({ fight: f, raid: best, counts: counts });
+    });
+    // trash that named no raid takes the raid of the boss after it, else before it
+    rows.forEach(function (row, i) {
+      if (row.raid) return;
+      for (var j = i + 1; j < rows.length; j++) if (rows[j].boss) { row.raid = rows[j].raid; return; }
+      for (var k = i - 1; k >= 0; k--) if (rows[k].raid) { row.raid = rows[k].raid; return; }
+    });
+
+    var byRaid = {};
+    var pullNo = {};
+    rows.forEach(function (row) {
+      if (!row.raid) return;
+      var out = byRaid[row.raid] || (byRaid[row.raid] = { raid: row.raid, steps: [], kills: 0, pulls: 0, bossKills: 0 });
+      if (row.boss) {
+        if (!row.fight.kill || !bosses) return;
+        // the same boss killed twice in one log: once is the route
+        for (var s = 0; s < out.steps.length; s++) {
+          if (out.steps[s].type === "encounter" && out.steps[s].boss === row.boss) return;
+        }
+        out.steps.push({ type: "encounter", boss: row.boss, when: "end", desc: "", actions: {} });
+        out.bossKills++;
+        return;
+      }
+      var mobs = [];
+      Object.keys(row.counts).forEach(function (n) {
+        if (standingOnly && raidOfName[n.toLowerCase()] !== row.raid) return;
+        mobs.push({ mob: n, kills: row.counts[n] });
+      });
+      var total = mobs.reduce(function (t, m) { return t + m.kills; }, 0);
+      if (total < minKills || mobs.length === 0) return;
+      mobs.sort(function (a, b) { return b.kills - a.kills || (a.mob < b.mob ? -1 : 1); });
+      pullNo[row.raid] = (pullNo[row.raid] || 0) + 1;
+      out.steps.push({ type: "kills", mobs: mobs, desc: opts.numberPulls ? ("Pull " + pullNo[row.raid]) : "", actions: {} });
+      out.kills += total;
+      out.pulls++;
+    });
+
+    return RAID_ORDER.filter(function (r) { return byRaid[r] && byRaid[r].steps.length > 0; })
+      .map(function (r) {
+        var o = byRaid[r];
+        o.text = "WRROUTE1\n" + r + "\n" + toLua({ fromLogs: true, source: (report.title || "Warcraft Logs"), steps: o.steps });
+        return o;
+      });
+  }
+
+  // A value as a Lua table literal, the way Readycheck writes its own
+  // exports ("|" and "#" as numeric escapes, no raw line breaks).
+  var KEYWORDS = { "and": 1, "break": 1, "do": 1, "else": 1, "elseif": 1, "end": 1, "false": 1, "for": 1,
+    "function": 1, "if": 1, "in": 1, "local": 1, "nil": 1, "not": 1, "or": 1, "repeat": 1, "return": 1,
+    "then": 1, "true": 1, "until": 1, "while": 1 };
+  // UTF-8 bytes of a string; a lone surrogate (half an emoji) becomes
+  // U+FFFD instead of throwing
+  function utf8(s) {
+    if (typeof TextEncoder !== "undefined") return Array.prototype.slice.call(new TextEncoder().encode(s));
+    var out = [];
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xFC00) === 0xDC00) {
+        c = 0x10000 + ((c - 0xD800) << 10) + (s.charCodeAt(++i) - 0xDC00);
+      } else if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 63));
+      else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+      else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+    return out;
+  }
+  function luaString(s) {
+    var bytes = utf8(String(s));
+    var out = '"';
+    for (var i = 0; i < bytes.length; i++) {
+      var c = bytes[i];
+      if (c === 92) out += "\\\\";
+      else if (c === 34) out += '\\"';
+      else if (c === 10) out += "\\n";
+      else if (c === 13) out += "\\r";
+      else if (c === 124) out += "\\124";
+      else if (c === 35) out += "\\035";
+      else if (c < 32 || c > 126) out += "\\" + ("00" + c).slice(-3);
+      else out += String.fromCharCode(c);
+    }
+    return out + '"';
+  }
+  function toLua(v) {
+    if (v === null || v === undefined) return "nil";
+    if (typeof v === "boolean") return v ? "true" : "false";
+    if (typeof v === "number") return isFinite(v) ? String(v) : "0";
+    if (typeof v === "string") return luaString(v);
+    if (Array.isArray(v)) return "{" + v.map(toLua).join(",") + "}";
+    var parts = [];
+    Object.keys(v).forEach(function (k) {
+      var key = (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !KEYWORDS[k]) ? k : "[" + luaString(k) + "]";
+      parts.push(key + "=" + toLua(v[k]));
+    });
+    return "{" + parts.join(",") + "}";
+  }
+
+  // One step as words, for the preview
+  function stepText(st) {
+    if (st.type === "encounter") return "Kill " + st.boss;
+    return st.mobs.map(function (m) { return m.kills + "x " + m.mob; }).join(" + ");
+  }
+
+  return { parseLink: parseLink, apiUrl: apiUrl, TOKEN_URL: TOKEN_URL, AUTHORIZE_URL: AUTHORIZE_URL,
+    Q_REPORT: Q_REPORT, Q_DEATHS: Q_DEATHS,
+    buildRoutes: buildRoutes, toLua: toLua, stepText: stepText, ENCOUNTERS: ENCOUNTERS };
+})();
+if (typeof module !== "undefined") module.exports = RouteCore;
+
+var RAID_MOBS = {"Naxxramas":["Bile Retcher","Bony Construct","Carrion Spinner","Crypt Guard","Crypt Reaver","Dark Touched Warrior","Death Lord","Death Touched Warrior","Deathknight","Deathknight Captain","Deathknight Cavalier","Deathknight Understudy","Deathknight Vindicator","Diseased Maggot","Doom Touched Warrior","Dread Creeper","Embalming Slime","Eye Stalk","Frenzied Bat","Infectious Ghoul","Infectious Skitterer","Living Monstrosity","Mad Scientist","Mutated Grub","Naxxramas Acolyte","Naxxramas Cultist","Naxxramas Follower","Naxxramas Worshipper","Necro Knight","Necro Knight Guardian","Necro Stalker","Necropolis Acolyte","Patchwork Golem","Plague Beast","Plague Slime","Plagued Bat","Plagued Deathhound","Plagued Gargoyle","Plagued Ghoul","Risen Deathknight","Rotting Maggot","Shade of Naxxramas","Skeletal Smith","Skeletal Steed","Sludge Belcher","Spirit of Naxxramas","Stitched Spewer","Stoneskin Gargoyle","Surgical Assistant","Tomb Horror","Unholy Axe","Unholy Staff","Unholy Swords","Venom Stalker"],"Blackwing Lair":["Blackwing Guardsman","Blackwing Spellbinder","Blackwing Taskmaster","Blackwing Technician","Blackwing Warlock","Corrupted Blue Whelp","Corrupted Bronze Whelp","Corrupted Green Whelp","Corrupted Red Whelp","Death Talon Captain","Death Talon Flamescale","Death Talon Hatcher","Death Talon Overseer","Death Talon Seether","Death Talon Wyrmguard","Death Talon Wyrmkin","Grethok the Controller","Master Elemental Shaper Krixix"],"Molten Core":["Ancient Core Hound","Core Hound","Core Rager","Firelord","Firesworn","Firewalker","Flame Imp","Flameguard","Flamewaker","Flamewaker Priest","Flamewaker Protector","Lava Annihilator","Lava Elemental","Lava Reaver","Lava Surger","Molten Destroyer","Molten Giant"],"Temple of Ahn'Qiraj":["Anubisath Defender","Anubisath Sentinel","Anubisath Warder","Obsidian Eradicator","Obsidian Nullifier","Ouro Spawner","Qiraji Brainwasher","Qiraji Champion","Qiraji Lasher","Qiraji Mindslayer","Qiraji Scarab","Qiraji Scorpion","Qiraji Slayer","Sartura's Royal Guard","Vekniss Drone","Vekniss Guardian","Vekniss Hive Crawler","Vekniss Soldier","Vekniss Stinger","Vekniss Warrior","Vekniss Wasp"]};
+// The Warcraft Logs app this page signs in as (a public "PKCE" client, so
+// there is no secret). Its redirect URL must be this page's address.
+var WCL_CLIENT_ID = "01a12339-d4da-7075-b0de-b2a248992a1f";
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  function get(store, k) { try { return window[store].getItem(k); } catch (e) { return null; } }
+  function set(store, k, v) { try { if (v == null) window[store].removeItem(k); else window[store].setItem(k, v); } catch (e) {} }
+  var memToken = null;
+  var REDIRECT = location.origin + location.pathname;
+
+  function token() {
+    if (memToken) return memToken;
+    var raw = get("localStorage", "rcroutes.token");
+    if (!raw) return null;
+    try {
+      var t = JSON.parse(raw);
+      if (t && t.access_token && (!t.expires_at || t.expires_at > Date.now() + 60000)) return (memToken = t.access_token);
+    } catch (e) {}
+    set("localStorage", "rcroutes.token", null);
+    return null;
+  }
+  function showSignedIn() {
+    var on = !!token();
+    $("signedOut").hidden = on;
+    $("signedIn").hidden = !on;
+  }
+  function signinError(msg) { var e = $("signinErr"); e.textContent = msg; e.hidden = !msg; }
+  function status(msg, cls) { var s = $("status"); s.className = cls || "hint"; s.textContent = msg; }
+
+  // ---- signing in: OAuth with PKCE (no secret on the page)
+  function b64url(bytes) {
+    var s = ""; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function randomString(n) { var a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
+  function login() {
+    if (!WCL_CLIENT_ID || WCL_CLIENT_ID.indexOf("CLIENT_ID") >= 0) { signinError("This page is not set up yet (no Warcraft Logs app)."); return; }
+    var verifier = randomString(48), state = randomString(16);
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)).then(function (hash) {
+      set("sessionStorage", "rcroutes.verifier", verifier);
+      set("sessionStorage", "rcroutes.state", state);
+      set("sessionStorage", "rcroutes.link", $("link").value.trim());
+      location.href = RouteCore.AUTHORIZE_URL + "?" + new URLSearchParams({
+        client_id: WCL_CLIENT_ID, response_type: "code", redirect_uri: REDIRECT, state: state,
+        code_challenge: b64url(new Uint8Array(hash)), code_challenge_method: "S256"
+      }).toString();
+    });
+  }
+  function finishLogin() {
+    var q = new URLSearchParams(location.search);
+    if (!q.has("code") && !q.has("error")) return Promise.resolve();
+    history.replaceState(null, "", REDIRECT);
+    var link = get("sessionStorage", "rcroutes.link");
+    if (link) $("link").value = link;
+    if (q.has("error")) { signinError("Sign-in was cancelled."); return Promise.resolve(); }
+    if (q.get("state") !== get("sessionStorage", "rcroutes.state")) { signinError("Sign-in did not match - please try again."); return Promise.resolve(); }
+    var verifier = get("sessionStorage", "rcroutes.verifier");
+    set("sessionStorage", "rcroutes.verifier", null);
+    set("sessionStorage", "rcroutes.state", null);
+    return fetch(RouteCore.TOKEN_URL, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", client_id: WCL_CLIENT_ID, code: q.get("code"),
+        redirect_uri: REDIRECT, code_verifier: verifier || "" }).toString()
+    }).then(function (r) {
+      if (!r.ok) throw new Error("Warcraft Logs did not finish the sign-in (" + r.status + "). Please try again.");
+      return r.json();
+    }).then(function (t) {
+      memToken = t.access_token;
+      set("localStorage", "rcroutes.token", JSON.stringify({ access_token: t.access_token,
+        expires_at: t.expires_in ? Date.now() + t.expires_in * 1000 : 0 }));
+      signinError("");
+    }).catch(function (e) { signinError(e.message || "Sign-in failed. Please try again."); });
+  }
+  $("login").onclick = login;
+  $("logout").onclick = function () { memToken = null; set("localStorage", "rcroutes.token", null); showSignedIn(); };
+
+  // ---- reading the report
+  function gql(api, query, vars) {
+    return fetch(api, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token() },
+      body: JSON.stringify({ query: query, variables: vars }) })
+      .then(function (r) {
+        if (r.status === 401) { memToken = null; set("localStorage", "rcroutes.token", null); showSignedIn(); throw new Error("Your sign-in ran out - click Sign in again."); }
+        if (!r.ok) throw new Error("Warcraft Logs answered " + r.status + " - try again in a moment.");
+        return r.json();
+      }, function () { throw new Error("Could not reach Warcraft Logs - check your connection and try again."); })
+      .then(function (j) { if (j.errors && j.errors.length) throw new Error(j.errors[0].message); return j.data; });
+  }
+  function fetchReport(p) {
+    var api = RouteCore.apiUrl(p.host);
+    status("Reading the report...");
+    return gql(api, RouteCore.Q_REPORT, { code: p.code }).then(function (d) {
+      var report = d.reportData && d.reportData.report;
+      if (!report) throw new Error("No report with that link - is it private, or deleted?");
+      var end = 0; report.fights.forEach(function (f) { if (f.endTime > end) end = f.endTime; });
+      var deaths = [];
+      function page(start) {
+        status("Counting kills... " + deaths.length);
+        return gql(api, RouteCore.Q_DEATHS, { code: p.code, start: start, end: end }).then(function (d2) {
+          var ev = d2.reportData.report.events;
+          deaths = deaths.concat(ev.data || []);
+          if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return page(ev.nextPageTimestamp);
+          return { report: report, deaths: deaths };
+        });
+      }
+      return page(0);
+    });
+  }
+  function copy(text, btn) {
+    function done() { var t = btn.textContent; btn.textContent = "Copied!"; setTimeout(function () { btn.textContent = t; }, 1600); }
+    function fallback() {
+      var ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (e) {} document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  }
+  function render(routes) {
+    var out = $("out"); out.textContent = "";
+    if (!routes.length) { status("No Molten Core, Blackwing Lair, Ahn'Qiraj or Naxxramas fights in that report.", "err"); return; }
+    function pl(n, one, many) { return n + " " + (n === 1 ? one : many); }
+    routes.forEach(function (r) {
+      var box = document.createElement("div"); box.className = "raid";
+      var h = document.createElement("h3"); h.textContent = r.raid; box.appendChild(h);
+      var sum = document.createElement("div"); sum.className = "hint";
+      sum.textContent = pl(r.pulls, "trash pull", "trash pulls") + " (" + pl(r.kills, "kill", "kills") + "), " + pl(r.bossKills, "boss", "bosses");
+      box.appendChild(sum);
+      var ol = document.createElement("ol");
+      r.steps.forEach(function (s) { var li = document.createElement("li"); li.textContent = RouteCore.stepText(s); if (s.type === "encounter") li.className = "boss"; ol.appendChild(li); });
+      box.appendChild(ol);
+      var b = document.createElement("button"); b.className = "go"; b.textContent = "Copy " + r.raid + " route";
+      b.onclick = function () { copy(r.text, b); }; box.appendChild(b);
+      out.appendChild(box);
+    });
+    $("results").hidden = false;
+    status("Done.", "ok");
+    $("results").scrollIntoView({ behavior: "smooth" });
+  }
+  $("make").onclick = function () {
+    var p = RouteCore.parseLink($("link").value);
+    if (!p) { status("Paste the whole report link - it starts with https:// and has /reports/ in it.", "err"); return; }
+    if (!token()) { status("Sign in first (step 1) - your link is kept.", "err"); $("signin").scrollIntoView({ behavior: "smooth" }); return; }
+    var opts = { bosses: $("optBoss").checked, standingOnly: $("optStanding").checked, numberPulls: $("optNumber").checked };
+    $("make").disabled = true;
+    fetchReport(p).then(function (data) { render(RouteCore.buildRoutes(data, RAID_MOBS, opts)); })
+      .catch(function (e) { status(e.message || String(e), "err"); })
+      .then(function () { $("make").disabled = false; });
+  };
+  // a link handed to the page (?report=...) is filled in
+  var pre = new URLSearchParams(location.search).get("report");
+  if (pre) $("link").value = pre;
+  finishLogin().then(showSignedIn);
+})();
+</script>
+</body>
+</html>
