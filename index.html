@@ -48,6 +48,12 @@ button:disabled{opacity:.5;cursor:default}
 .raid li .steptext.clickable:hover{color:var(--accent);border-bottom-color:var(--accent)}
 .raid li .steptext.open{color:var(--accent)}
 .raid li .steptext.named{font-style:italic}
+.raid li.off .steptext{color:var(--muted);text-decoration:line-through}
+.raid li .tag.off{border-color:var(--muted);color:var(--muted)}
+.raid .mobcard{background:var(--panel);border:1px solid var(--line);padding:8px 10px;margin:8px 0 4px;font-size:13px}
+.raid .mobtitle{color:var(--muted);margin-bottom:4px}
+.raid .moblist{display:flex;flex-wrap:wrap;gap:4px 16px}
+.raid .moblist .cb,.raid li .cfg .mobs .cb{display:flex;gap:4px;align-items:center;font-size:13px}
 .raid li .icons{margin-left:8px;vertical-align:middle}
 .raid li .icons .ico{display:inline-block;width:18px;height:18px;vertical-align:middle;margin:0 2px}
 .raid li .icons a.ico ins{vertical-align:top}
@@ -88,7 +94,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 <label class="check"><input type="checkbox" id="optBoss" checked> A step for each boss kill (wipes are left out)</label>
 <label class="check"><input type="checkbox" id="optStanding" checked> Only count mobs that stand in the raid, not ones summoned during a pull</label>
 <label class="check"><input type="checkbox" id="optSplit" checked> Split packs that were pulled back to back (each kill is matched to the pack it spawned in, using where it died)</label>
-<label class="check"><input type="checkbox" id="optKey" checked> Only list the key mobs of each pack (the one or two kinds found in the fewest places in that raid), not every mob</label>
+<label class="check"><input type="checkbox" id="optKey" checked> Start each pull with only its key mobs ticked (the one or two kinds found in the fewest places in that raid). You pick which mobs the route tracks on every step either way.</label>
 <label class="check"><input type="checkbox" id="optNumber"> Name each trash step "Pull 1", "Pull 2"...</label>
 </details>
 <div class="row" style="margin-top:14px"><button class="go" id="make">Make my route</button><span id="status" class="hint"></span></div>
@@ -197,9 +203,10 @@ var RouteCore = (function () {
   //         minKills (1), splitChains (true), splitGap (20000 ms),
   //         packDistance (90 yards), overlapSlack (2000 ms),
   //         keyMobs (true), keyMax (2) }
-  // keyMobs: a kill step lists only the kinds that mark the pack out -
-  // the ones found in the fewest places in that raid, at most keyMax of
-  // them; the rest are kept on step.dropped for the preview only.
+  // keyMobs: a kill step starts with only the kinds that mark the pack
+  // out - the ones found in the fewest places in that raid, at most
+  // keyMax of them; the rest go on step.dropped. The page lets the
+  // player tick any of them (step.mobs + step.dropped is the whole pull).
   // splitChains: Warcraft Logs only starts a new trash fight when the
   // raid leaves combat, so packs pulled back to back share one fight.
   // With kill positions (data.kills) and the raid map's packs
@@ -622,7 +629,6 @@ var RouteCore = (function () {
       var o = { type: st.type, desc: st.desc || "", actions: st.actions || {} };
       if (st.type === "encounter") { o.boss = st.boss; o.when = st.when || "end"; }
       else o.mobs = st.mobs;
-      if (st.at) o.at = st.at;
       return o;
     });
     return "WRROUTE1\n" + route.raid + "\n" + toLua({ fromLogs: true, source: route.source || "Warcraft Logs", steps: steps });
@@ -855,7 +861,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     function pl(n, one, many) { return n + " " + (n === 1 ? one : many); }
     info.textContent = (c.name || "Your character") + (c.class ? " (" + c.class.charAt(0) + c.class.slice(1).toLowerCase() + ")" : "") + ": " +
       pl(c.sets.length, "gear set", "gear sets") + ", " + pl(c.gear.length, "item", "items") + " and " + pl(c.use.length, "consumable", "consumables") +
-      ". Click a step below to set it up like in game; nothing changes in game until you paste the route.";
+      ". Click a step below to pick its gear, trinkets, items and reminders like in game; nothing changes in game until you paste the route.";
     c.sets.forEach(function (st) {
       var row = document.createElement("div"); row.className = "set";
       var b = document.createElement("b"); b.textContent = st.name; row.appendChild(b);
@@ -908,6 +914,19 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     return a;
   }
   function hasCfg(c) { return !!c && (Object.keys(actionsOf(c)).length > 0 || !!c.desc); }
+  // ---- which mobs of a pull the route tracks: every mob of the pull is
+  // offered, the key mobs (or all of them) start ticked
+  function allMobs(s) {
+    return (s.mobs || []).concat(s.dropped || []).slice().sort(function (a, b) { return b.kills - a.kills || (a.mob < b.mob ? -1 : 1); });
+  }
+  function trackOf(r, i, s) {
+    picks[r.raid] = picks[r.raid] || {};
+    var pk = picks[r.raid][i] = picks[r.raid][i] || {};
+    if (!pk.track) { pk.track = {}; (s.mobs || []).forEach(function (m) { pk.track[m.mob] = true; }); (s.dropped || []).forEach(function (m) { pk.track[m.mob] = false; }); }
+    return pk.track;
+  }
+  function trackedMobs(r, i, s) { var t = trackOf(r, i, s); return allMobs(s).filter(function (m) { return t[m.mob]; }); }
+  function mobText(list) { return list.map(function (m) { return m.kills + "x " + m.mob; }).join(" + "); }
   function summaryOf(c) {
     if (!c) return [];
     var out = [];
@@ -930,9 +949,9 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
         var p = pk[i] || {};
         if (st.baseDesc === undefined) st.baseDesc = st.desc || "";
         if (st.type === "kills") {
-          st.actions = actionsOf(p.then);
-          st.desc = (p.then && p.then.desc) || st.baseDesc;
-          steps.push(st);
+          var tm = trackedMobs(r, i, st);
+          if (!tm.length) return;   // nothing ticked: the pull is left out of the route
+          steps.push({ type: "kills", mobs: tm, desc: (p.then && p.then.desc) || st.baseDesc, actions: actionsOf(p.then) });
         } else if (st.type === "encounter") {
           if (hasCfg(p.pull)) steps.push({ type: "encounter", boss: st.boss, when: "start", desc: "", actions: actionsOf(p.pull) });
           st.actions = actionsOf(p.after);
@@ -1070,7 +1089,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     return n;
   }
   // click the step's text to open its editor; its icons sit after the text
-  function stepEditor(li, textEl, r, i, s) {
+  function stepEditor(li, textEl, r, i, s, restEl, offTag) {
     var pk = (picks[r.raid] || {})[i] || {};
     var icons = el("span", "icons");
     li.appendChild(icons);
@@ -1079,6 +1098,7 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     if (pk.open) textEl.classList.add("open");
     function refresh() {
       icons.textContent = "";
+      if (!character) { applyPicks(window.__lastRoutes); return; }
       if (s.type === "kills") iconsOf(pk.then, icons);
       else {
         var pull = el("span", "grp"), after = el("span", "grp");
@@ -1098,9 +1118,16 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     function showName() {
       var c = pk[s.type === "kills" ? "then" : "after"];
       var name = (c && c.desc) || "";
-      textEl.textContent = name || RouteCore.stepText(s);
+      var plain = s.type === "kills" ? (mobText(trackedMobs(r, i, s)) || mobText(allMobs(s))) : RouteCore.stepText(s);
+      textEl.textContent = name || plain;
       textEl.classList.toggle("named", !!name);
-      textEl.title = name ? RouteCore.stepText(s) + " - click to set this step up" : "Click to set this step up";
+      textEl.title = name ? plain + " - click to set this step up" : "Click to set this step up";
+      if (s.type === "kills") {
+        var t = trackOf(r, i, s), off = allMobs(s).filter(function (m) { return !t[m.mob]; }), on = allMobs(s).length - off.length;
+        restEl.textContent = (on && off.length) ? " (not tracked: " + off.map(function (m) { return m.kills + "x " + m.mob; }).join(", ") + ")" : "";
+        offTag.hidden = on > 0;
+        li.classList.toggle("off", !on);
+      }
     }
     function build() {
       // the step's name (its label in the route list), like in game
@@ -1110,6 +1137,18 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
       lab.placeholder = "optional - shown instead of " + (s.type === "kills" ? "the mob list" : "\"Kill " + s.boss + "\"");
       lab.oninput = function () { c.desc = lab.value; showName(); refresh(); };
       fieldRow(panel, "Name:").appendChild(lab);
+      if (s.type === "kills") {
+        // which of the pull's mobs the route counts
+        var f = fieldRow(panel, "Mobs:"); f.classList.add("mobs");
+        var t = trackOf(r, i, s);
+        allMobs(s).forEach(function (m) {
+          var lb = el("label", "cb"); var ck = document.createElement("input"); ck.type = "checkbox"; ck.checked = !!t[m.mob];
+          ck.onchange = function () { t[m.mob] = ck.checked; showName(); refresh(); syncRaidMobs(r); };
+          lb.appendChild(ck); lb.appendChild(document.createTextNode(m.kills + "x " + m.mob)); f.appendChild(lb);
+        });
+        f.appendChild(el("span", "fnote", "Untick a mob and the route stops counting it on this pull; untick all of them and the pull is left out."));
+      }
+      if (!character) { panel.appendChild(el("div", "fnote", "Paste your character above to pick gear sets, trinkets, items and reminders for this step.")); return; }
       if (s.type === "kills") section(panel, r, i, "then", null, refresh);
       else { section(panel, r, i, "pull", "When " + s.boss + " is pulled", refresh); section(panel, r, i, "after", "After the kill", refresh); }
     }
@@ -1118,6 +1157,37 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     li.appendChild(panel);
     showName();
     refresh();
+  }
+  // every kind of mob in the raid's pulls, with a box each: ticking one
+  // tracks it on every pull it is in, unticking stops counting it anywhere
+  var raidMobBoxes = {};   // raid -> [{ name, box }]
+  function raidMobs(r) {
+    var kinds = {};
+    r.steps.forEach(function (s, i) { if (s.type !== "kills") return; allMobs(s).forEach(function (m) { kinds[m.mob] = kinds[m.mob] || { pulls: 0, kills: 0 }; kinds[m.mob].pulls++; kinds[m.mob].kills += m.kills; }); });
+    var names = Object.keys(kinds).sort();
+    var card = el("div", "mobcard");
+    card.appendChild(el("div", "mobtitle", "Mobs the route tracks (tick or untick a kind for every pull it is in; click a step to change one pull):"));
+    var wrap = el("div", "moblist"); card.appendChild(wrap);
+    raidMobBoxes[r.raid] = [];
+    names.forEach(function (n) {
+      var lb = el("label", "cb"); var ck = document.createElement("input"); ck.type = "checkbox";
+      ck.onchange = function () {
+        r.steps.forEach(function (s, i) { if (s.type !== "kills") return; var t = trackOf(r, i, s); if (n in t) t[n] = ck.checked; });
+        rerender();
+      };
+      lb.appendChild(ck); lb.appendChild(document.createTextNode(n + " (" + kinds[n].pulls + (kinds[n].pulls === 1 ? " pull" : " pulls") + ", " + kinds[n].kills + " kills)"));
+      wrap.appendChild(lb);
+      raidMobBoxes[r.raid].push({ name: n, box: ck });
+    });
+    syncRaidMobs(r);
+    return card;
+  }
+  function syncRaidMobs(r) {
+    (raidMobBoxes[r.raid] || []).forEach(function (e) {
+      var on = 0, total = 0;
+      r.steps.forEach(function (s, i) { if (s.type !== "kills") return; var t = trackOf(r, i, s); if (e.name in t) { total++; if (t[e.name]) on++; } });
+      e.box.checked = on === total && total > 0; e.box.indeterminate = on > 0 && on < total;
+    });
   }
   function render(routes, keepScroll) {
     var out = $("out"); out.textContent = "";
@@ -1137,23 +1207,21 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
         var note = document.createElement("div"); note.className = "note";
         note.textContent = pl(r.chains, "fight was a chain pull", "fights were chain pulls") + " (packs pulled back to back) and " +
           (r.chains === 1 ? "was" : "were") + " split into " + pl(r.split, "step", "steps") + ", marked \"split\" below. " +
-          (byPack ? "Each of those steps is one pull, worked out from when its mobs were pulled and where they died, and is already placed on the raid map. " +
+          (byPack ? "Each of those steps is one pull, worked out from when its mobs were pulled and where they died. " +
                     "If the steps look too fine, untick the split option under Options and make the route again."
                   : "This log has no positions, so a 20 second gap between kills was taken as the next pack. " +
                     "Check those look like separate packs; if a slow pack got cut in two, untick the split option under Options.");
         box.appendChild(note);
       }
+      box.appendChild(raidMobs(r));
       var ol = document.createElement("ol");
       r.steps.forEach(function (s, i) {
         var li = document.createElement("li"); var textEl = el("span", "steptext", RouteCore.stepText(s)); li.appendChild(textEl);
         if (s.type === "encounter") li.className = "boss";
         if (s.split) { var tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "split"; li.appendChild(tag); }
-        if (s.dropped && s.dropped.length) {
-          var rest = document.createElement("span"); rest.className = "rest";
-          rest.textContent = " (with " + s.dropped.map(function (m) { return m.kills + "x " + m.mob; }).join(", ") + ")";
-          li.appendChild(rest);
-        }
-        if (character) stepEditor(li, textEl, r, i, s);
+        var offTag = el("span", "tag off", "left out"); offTag.title = "No mob of this pull is ticked, so it is not in the route"; offTag.hidden = true; li.appendChild(offTag);
+        var rest = el("span", "rest", ""); li.appendChild(rest);
+        stepEditor(li, textEl, r, i, s, rest, offTag);
         ol.appendChild(li);
       });
       box.appendChild(ol);
