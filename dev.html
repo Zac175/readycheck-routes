@@ -167,6 +167,24 @@ var RouteCore = (function () {
     var splitChains = opts.splitChains !== false, splitGap = opts.splitGap || 20000;
     var packDistance = opts.packDistance || 90;
     var overlapSlack = opts.overlapSlack != null ? opts.overlapSlack : 2000;
+    var engageGap = opts.engageGap || 6000;
+    // when each enemy was pulled: the first debuff that landed on it
+    var engageOf = {};
+    (Array.isArray(data.engages) ? data.engages : []).forEach(function (ev) {
+      var key = ev.targetID + ":" + (ev.targetInstance || 0);
+      var t = ev.timestamp || 0;
+      (engageOf[key] || (engageOf[key] = [])).push(t);
+    });
+    Object.keys(engageOf).forEach(function (k) { engageOf[k].sort(function (a, b) { return a - b; }); });
+    // the first debuff on that unit inside the fight and before it died
+    function engageFor(ev, f) {
+      var list = engageOf[ev.targetID + ":" + (ev.targetInstance || 0)];
+      if (!list) return null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] >= f.startTime - 1000 && list[i] <= (ev.timestamp || 0)) return list[i];
+      }
+      return null;
+    }
     var report = data && data.report;
     if (!report || !Array.isArray(report.fights)) throw new Error("That is not a Warcraft Logs report - the fights are missing.");
     var actors = {};
@@ -211,8 +229,10 @@ var RouteCore = (function () {
         }
         if (fid == null) return;
         var at = placeOf(ev);
+        var fobj = null;
+        for (var q = 0; q < fights.length; q++) if (fights[q].id === fid) { fobj = fights[q]; break; }
         (deathsBy[fid] || (deathsBy[fid] = [])).push({ name: a.name, id: a.gameID, t: ev.timestamp || 0,
-          X: at ? at.X : null, Y: at ? at.Y : null });
+          X: at ? at.X : null, Y: at ? at.Y : null, e: fobj ? engageFor(ev, fobj) : null });
       });
     }
 
@@ -303,11 +323,66 @@ var RouteCore = (function () {
       });
     });
 
+    // ---- the pulls of one trash fight, from when each mob was pulled.
+    // Mobs pulled within engageGap of each other are one pull; mobs of
+    // the same spawn pack always stay in one pull; mobs with no pull
+    // time go with their pack, else the pull that was alive when they died.
+    function pullsOf(row, I) {
+      var list = row.list;
+      var timed = list.filter(function (d) { return d.e != null; }).sort(function (a, b) { return a.e - b.e; });
+      var pulls = [];
+      timed.forEach(function (d) {
+        var cur = pulls[pulls.length - 1];
+        if (!cur || d.e - cur.lastE > engageGap) { cur = { mobs: [], firstE: d.e, lastE: d.e, packs: {} }; pulls.push(cur); }
+        cur.mobs.push(d);
+        cur.lastE = d.e;
+        if (d.pack != null) cur.packs[d.pack] = true;
+      });
+      // one spawn pack split over two pulls (a mob that ran in late): join them
+      for (var i = 0; i < pulls.length; i++) {
+        for (var j = i + 1; j < pulls.length; j++) {
+          var share = Object.keys(pulls[j].packs).some(function (pk) { return pulls[i].packs[pk]; });
+          if (share) {
+            pulls[i].mobs = pulls[i].mobs.concat(pulls[j].mobs);
+            Object.keys(pulls[j].packs).forEach(function (pk) { pulls[i].packs[pk] = true; });
+            if (pulls[j].lastE > pulls[i].lastE) pulls[i].lastE = pulls[j].lastE;
+            pulls.splice(j, 1);
+            j = i;
+          }
+        }
+      }
+      pulls.forEach(function (p) { p.lastT = Math.max.apply(null, p.mobs.map(function (d) { return d.t; })); });
+      list.forEach(function (d) {
+        if (d.e != null) return;
+        var home = null;
+        if (d.pack != null) pulls.forEach(function (p) { if (!home && p.packs[d.pack]) home = p; });
+        if (!home) pulls.forEach(function (p) { if (!home && d.t >= p.firstE && d.t <= p.lastT + 3000) home = p; });
+        if (!home) {
+          var bt = Infinity;
+          pulls.forEach(function (p) { var dt = Math.abs(p.lastT - d.t); if (dt < bt) { bt = dt; home = p; } });
+        }
+        if (home) home.mobs.push(d);
+      });
+      pulls.sort(function (a, b) { return a.firstE - b.firstE; });
+      return pulls.map(function (p) {
+        var counts = {}, byPack = {}, best = null;
+        p.mobs.forEach(function (d) {
+          counts[d.name] = (counts[d.name] || 0) + 1;
+          if (d.pack != null) {
+            byPack[d.pack] = (byPack[d.pack] || 0) + 1;
+            if (best == null || byPack[d.pack] > byPack[best]) best = d.pack;
+          }
+        });
+        return { counts: counts, pack: (I && best != null) ? I.packs[best] : null };
+      });
+    }
+
     // ---- the steps of one trash fight: one per pack, else the gap rule
     function groupsOf(row) {
       if (!row.list) return [{ counts: row.counts }];
       var I = splitChains && indexFor(row.raid);
       var list = row.list;
+      if (splitChains && list.some(function (d) { return d.e != null; })) return pullsOf(row, I);
       if (I && list.some(function (d) { return d.pack != null; })) {
         // kills that matched no pack (summoned adds, strays) go with the
         // nearest kill in time that did
@@ -528,11 +603,25 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
         status("Finding the packs... " + kills.length);
         return gql("killpos", p, { start: start, end: end }).then(function (d3) {
           var ev = d3 && d3.reportData && d3.reportData.report && d3.reportData.report.events;
-          if (!ev) return { report: report, deaths: deaths, kills: kills };
+          if (!ev) return pulled(0);
           kills = kills.concat(ev.data || []);
           if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return places(ev.nextPageTimestamp);
-          return { report: report, deaths: deaths, kills: kills };
-        }).catch(function () { return { report: report, deaths: deaths, kills: kills }; });
+          return pulled(0);
+        }).catch(function () { return pulled(0); });
+      }
+      // when each mob was pulled (the first debuff on it), so mobs pulled
+      // together stay one step even when they die one at a time
+      var engages = [];
+      function pulled(start) {
+        status("Working out the pulls... " + engages.length);
+        var done = function () { return { report: report, deaths: deaths, kills: kills, engages: engages }; };
+        return gql("engage", p, { start: start, end: end }).then(function (d4) {
+          var ev = d4 && d4.reportData && d4.reportData.report && d4.reportData.report.events;
+          if (!ev) return done();
+          engages = engages.concat(ev.data || []);
+          if (ev.nextPageTimestamp != null && ev.nextPageTimestamp > start) return pulled(ev.nextPageTimestamp);
+          return done();
+        }).catch(done);
       }
       return page(0);
     });
