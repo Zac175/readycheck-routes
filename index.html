@@ -74,6 +74,27 @@ button:disabled{opacity:.5;cursor:default}
 .raid li .cfg .rem{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .raid li .cfg .rem .cb{display:flex;gap:3px;align-items:center;font-size:12px;color:var(--muted)}
 .raid li .cfg button.small{padding:3px 8px;font-size:12px}
+.dd{display:inline-block;position:relative;font-size:13px;vertical-align:middle}
+.dd-btn{display:inline-flex;align-items:center;gap:6px;background:var(--field);color:var(--text);border:1px solid var(--line);padding:2px 6px;min-width:150px;max-width:280px;cursor:pointer;line-height:18px}
+.dd-btn:hover{border-color:var(--accent)}
+.dd-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-caret{color:var(--muted);font-size:11px}
+.dd .ico,.dd-list .ico{display:inline-block;width:18px;height:18px;flex:none;vertical-align:middle}
+.dd a.ico ins,.dd-list a.ico ins{vertical-align:top}
+.dd-list{position:fixed;z-index:50;background:var(--panel2);border:1px solid var(--accent);box-shadow:0 6px 18px rgba(0,0,0,.5);overflow:auto;font-size:13px;min-width:180px}
+.dd-opt{display:flex;align-items:center;gap:8px;padding:4px 8px;cursor:pointer;white-space:nowrap}
+.dd-opt:hover{background:var(--field)}
+.dd-opt.on{color:var(--accent)}
+.dd-opt .ico.blank{visibility:hidden}
+.raid li .cfg .ghead{display:flex;align-items:center;gap:6px;margin:6px 0 2px;cursor:pointer;user-select:none}
+.raid li .cfg .ghead .tri{color:var(--accent);width:12px;font-size:12px}
+.raid li .cfg .ghead .gtitle{font-weight:600;color:var(--gold)}
+.raid li .cfg .ghead .gsum{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.raid li .cfg .ghead:hover .gtitle{text-decoration:underline}
+.raid li .cfg .gbody{margin-left:18px}
+.raid li .cfg .gbody .gbody{margin-left:12px}
+.raid li .cfg .chip .ico,.raid li .cfg .rem .ico{display:inline-block;width:18px;height:18px;vertical-align:middle;margin-right:4px}
+.raid li .cfg .chip a.ico ins,.raid li .cfg .rem a.ico ins{vertical-align:top}
 details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px}
 .steps{margin:0;padding-left:22px}
 .steps li{margin:4px 0}
@@ -94,7 +115,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:12px
 <label class="check"><input type="checkbox" id="optBoss" checked> A step for each boss kill (wipes are left out)</label>
 <label class="check"><input type="checkbox" id="optStanding" checked> Only count mobs that stand in the raid, not ones summoned during a pull</label>
 <label class="check"><input type="checkbox" id="optSplit" checked> Split packs that were pulled back to back (each kill is matched to the pack it spawned in, using where it died)</label>
-<label class="check"><input type="checkbox" id="optKey" checked> Start each pull with only its key mobs ticked (the one or two kinds found in the fewest places in that raid). You pick which mobs the route tracks on every step either way.</label>
+<label class="check"><input type="checkbox" id="optKey"> Start each pull with only its key mobs ticked (the one or two kinds found in the fewest places in that raid) instead of every mob. You pick which mobs the route tracks on every step either way.</label>
 <label class="check"><input type="checkbox" id="optNumber"> Name each trash step "Pull 1", "Pull 2"...</label>
 </details>
 <div class="row" style="margin-top:14px"><button class="go" id="make">Make my route</button><span id="status" class="hint"></span></div>
@@ -964,94 +985,190 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
   }
   function rerender() { if (window.__lastRoutes) { applyPicks(window.__lastRoutes); render(window.__lastRoutes, true); } }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-  function selectEl(options, current, onPick) {
-    var sel = document.createElement("select");
-    options.forEach(function (o) { var e = document.createElement("option"); e.value = String(o.v); e.textContent = o.t; if (String(o.v) === String(current)) e.selected = true; sel.appendChild(e); });
-    sel.onchange = function () { onPick(sel.value, sel); };
-    return sel;
-  }
   function fieldRow(panel, label) { var row = el("div", "frow"); row.appendChild(el("span", "flabel", label)); var f = el("span", "field"); row.appendChild(f); panel.appendChild(row); return f; }
+
+  // ---- a dropdown that shows an icon beside each choice (a native select
+  // cannot). The open list is fixed-positioned so the scrolling step list
+  // does not clip it, and it closes on any click elsewhere or a scroll.
+  var openDD = null;
+  function closeDD() { if (openDD) { openDD.remove(); openDD = null; } }
+  document.addEventListener("click", function (e) { if (openDD && !openDD.contains(e.target) && !(openDD.owner && openDD.owner.contains(e.target))) closeDD(); });
+  // the page or the step list scrolling under an open list: move the list with its button
+  function placeDD() {
+    if (!openDD || !openDD.owner) return;
+    var r = openDD.owner.firstChild.getBoundingClientRect();
+    var below = window.innerHeight - r.bottom - 8, above = r.top - 8;
+    openDD.style.left = Math.max(4, Math.min(r.left, window.innerWidth - openDD.offsetWidth - 4)) + "px";
+    if (below >= 160 || below >= above) {   // under the button, as usual
+      openDD.style.top = (r.bottom + 2) + "px";
+      openDD.style.maxHeight = Math.max(80, below) + "px";
+    } else {                                 // no room: above it
+      openDD.style.maxHeight = Math.max(80, above) + "px";
+      var h = Math.min(openDD.scrollHeight, Math.max(80, above));
+      openDD.style.top = Math.max(4, r.top - 2 - h) + "px";
+    }
+  }
+  document.addEventListener("scroll", placeDD, true);
+  window.addEventListener("resize", placeDD);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDD(); });
+  // options: [{ v, t, icon: function returning an element (or null) }]
+  function dropdown(options, current, onPick, field) {
+    var root = el("span", "dd"); if (field) root.setAttribute("data-field", field);
+    var btn = el("span", "dd-btn"); root.appendChild(btn);
+    function cur() { return options.filter(function (o) { return String(o.v) === String(current); })[0] || options[0]; }
+    function draw() {
+      var c = cur(); btn.textContent = "";
+      if (c.icon) btn.appendChild(c.icon());
+      btn.appendChild(el("span", "dd-text", c.t)); btn.appendChild(el("span", "dd-caret", "▾"));
+      root.setAttribute("data-value", String(c.v));
+      nameItems();
+    }
+    btn.onclick = function (e) {
+      e.stopPropagation();
+      if (openDD && openDD.owner === root) { closeDD(); return; }
+      closeDD();
+      var list = el("div", "dd-list"); list.owner = root;
+      options.forEach(function (o) {
+        var row = el("div", "dd-opt"); row.setAttribute("data-value", String(o.v));
+        if (String(o.v) === String(current)) row.classList.add("on");
+        if (o.icon) row.appendChild(o.icon()); else row.appendChild(el("span", "ico blank"));
+        row.appendChild(el("span", "dd-text", o.t));
+        row.onclick = function (ev) { ev.stopPropagation(); current = o.v; draw(); closeDD(); onPick(o.v, root); };
+        list.appendChild(row);
+      });
+      list.style.minWidth = btn.getBoundingClientRect().width + "px";
+      document.body.appendChild(list); openDD = list;
+      placeDD();
+      nameItems();
+    };
+    root.set = function (v) { current = v; draw(); };
+    draw();
+    return root;
+  }
+  // ---- a collapsible group inside the editor; whether it is open is
+  // remembered per group name, so folding "Reminders" once folds it on
+  // every step you open after
+  function group(panel, key, title, summaryFn, build) {
+    var head = el("div", "ghead"), tri = el("span", "tri"), sum = el("span", "gsum");
+    head.appendChild(tri); head.appendChild(el("span", "gtitle", title)); head.appendChild(sum);
+    var body = el("div", "gbody");
+    panel.appendChild(head); panel.appendChild(body);
+    var open = recall("rcroutes.g." + key) !== "0";
+    function paint() { body.hidden = !open; tri.textContent = open ? "▾" : "▸"; sum.textContent = open ? "" : (summaryFn() || "nothing set"); }
+    head.onclick = function () { open = !open; remember("rcroutes.g." + key, open ? "1" : "0"); paint(); };
+    build(body);
+    paint();
+    return paint;
+  }
+  var setOpt = function (st) { return { v: st.name, t: st.name, icon: function () { return setIcon(st.name); } }; };
+  var itemOpt = function (g, t) { return { v: g.id, t: t || g.name, icon: function () { return itemIcon(g.id); } }; };
   // one context of a step (a kills step, or a boss's pull / after-kill)
   function section(panel, r, i, field, title, changed) {
     var c = cfgOf(r, i, field);
-    if (title) panel.appendChild(el("div", "ftitle", title));
+    var paints = [];
     var isBoss = field !== "then";
-    // Gear set
-    var f = fieldRow(panel, "Gear set:");
-    f.appendChild(selectEl([{ v: "", t: "None (don't swap)" }].concat(character.sets.map(function (st) { return { v: st.name, t: st.name }; })), c.set,
-      function (v) { c.set = v; changed(); }));
-    if (isBoss) f.appendChild(el("span", "fnote", "Shared with Raid Config - one setting, both places."));
-    // Trinkets
-    var trinkets = character.gear.filter(function (g) { return g.slots.indexOf(13) >= 0; });
-    var tOpts = function () { return [{ v: 0, t: "None" }].concat(trinkets.map(function (g) { return { v: g.id, t: g.name }; })); };
-    fieldRow(panel, "Trinket 1:").appendChild(selectEl(tOpts(), c.t1, function (v) { c.t1 = Number(v) || 0; changed(); }));
-    fieldRow(panel, "Trinket 2:").appendChild(selectEl(tOpts(), c.t2, function (v) { c.t2 = Number(v) || 0; changed(); }));
-    // Slot gear: a slot, then an item that fits it
-    f = fieldRow(panel, "Slot gear:");
-    var slotSel = selectEl(SLOT_LIST.map(function (e) { return { v: e[0], t: e[1] }; }), 1, function () { fillItems(); });
-    var itemSel = document.createElement("select");
-    var list = el("div", "chips");
-    function fillItems() {
-      var slot = Number(slotSel.value);
-      var opts = [{ v: "", t: "Pick an item..." }, { v: -1, t: "(Unequip - leave slot empty)" }];
-      character.gear.forEach(function (g) { if (g.slots.indexOf(slot) >= 0) opts.push({ v: g.id, t: g.name }); });
-      itemSel.textContent = "";
-      opts.forEach(function (o) { var e = document.createElement("option"); e.value = String(o.v); e.textContent = o.t; itemSel.appendChild(e); });
+    function touched() { changed(); paints.forEach(function (p) { p(); }); }
+    function gearSummary() {
+      var out = [];
+      if (c.set) out.push("Gear set: " + c.set);
+      if (c.t1) out.push("Trinket 1: " + itemName(c.t1));
+      if (c.t2) out.push("Trinket 2: " + itemName(c.t2));
+      Object.keys(c.slots).forEach(function (k) { out.push(SLOT_NAME[k] + ": " + (c.slots[k] === -1 ? "empty" : itemName(c.slots[k]))); });
+      return out.join(", ");
     }
-    itemSel.onchange = function () {
-      if (!itemSel.value) return;
-      c.slots[Number(slotSel.value)] = Number(itemSel.value);
-      // move on to the next slot with nothing set, like the game does
-      for (var k = 0; k < SLOT_LIST.length; k++) { if (!c.slots[SLOT_LIST[k][0]]) { slotSel.value = String(SLOT_LIST[k][0]); break; } }
-      fillItems(); drawSlots(); changed();
-    };
-    fillItems();
-    f.appendChild(slotSel); f.appendChild(itemSel);
-    function drawSlots() {
-      list.textContent = "";
-      SLOT_LIST.forEach(function (e) {
-        var id = c.slots[e[0]]; if (!id) return;
-        var chip = el("span", "chip", e[1] + ": " + (id === -1 ? "empty" : itemName(id)));
-        var x = el("span", null, "x"); x.title = "remove"; x.onclick = function () { delete c.slots[e[0]]; drawSlots(); changed(); };
-        chip.appendChild(x); list.appendChild(chip);
-      });
+    function remSummary() { var n = c.rems.filter(function (x) { return x.text || x.itemId; }).length; return n ? n + (n === 1 ? " reminder" : " reminders") : ""; }
+    function buildGear(body) {
+      // Gear set
+      var f = fieldRow(body, "Gear set:");
+      f.appendChild(dropdown([{ v: "", t: "None (don't swap)" }].concat(character.sets.map(setOpt)), c.set, function (v) { c.set = v; touched(); }, "set"));
+      if (isBoss) f.appendChild(el("span", "fnote", "Shared with Raid Config - one setting, both places."));
+      // Trinkets
+      var trinkets = character.gear.filter(function (g) { return g.slots.indexOf(13) >= 0; });
+      var tOpts = function () { return [{ v: 0, t: "None" }].concat(trinkets.map(function (g) { return itemOpt(g); })); };
+      fieldRow(body, "Trinket 1:").appendChild(dropdown(tOpts(), c.t1, function (v) { c.t1 = Number(v) || 0; touched(); }, "t1"));
+      fieldRow(body, "Trinket 2:").appendChild(dropdown(tOpts(), c.t2, function (v) { c.t2 = Number(v) || 0; touched(); }, "t2"));
+      // Slot gear: a slot, then an item that fits it
+      f = fieldRow(body, "Slot gear:");
+      var slotNow = 1, itemDD = null;
+      var list = el("div", "chips");
+      function itemOpts() {
+        var opts = [{ v: "", t: "Pick an item..." }, { v: -1, t: "(Unequip - leave slot empty)", icon: function () { return plainIcon("inv_misc_bag_08", "leave empty"); } }];
+        character.gear.forEach(function (g) { if (g.slots.indexOf(slotNow) >= 0) opts.push(itemOpt(g)); });
+        return opts;
+      }
+      function drawSlots() {
+        list.textContent = "";
+        SLOT_LIST.forEach(function (e) {
+          var id = c.slots[e[0]]; if (!id) return;
+          var chip = el("span", "chip");
+          chip.appendChild(id === -1 ? plainIcon("inv_misc_bag_08", "leave empty") : itemIcon(id));
+          chip.appendChild(document.createTextNode(e[1] + ": " + (id === -1 ? "empty" : itemName(id))));
+          var x = el("span", "x", "x"); x.title = "remove"; x.onclick = function () { delete c.slots[e[0]]; drawSlots(); touched(); };
+          chip.appendChild(x); list.appendChild(chip);
+        });
+        nameItems();
+      }
+      function placeItemDD() {
+        var fresh = dropdown(itemOpts(), "", function (v) {
+          if (v === "") return;
+          c.slots[slotNow] = Number(v);
+          for (var k = 0; k < SLOT_LIST.length; k++) { if (!c.slots[SLOT_LIST[k][0]]) { slotNow = SLOT_LIST[k][0]; slotDD.set(slotNow); break; } }
+          placeItemDD(); drawSlots(); touched();
+        }, "slotitem");
+        if (itemDD) f.replaceChild(fresh, itemDD); else f.appendChild(fresh);
+        itemDD = fresh;
+      }
+      var slotDD = dropdown(SLOT_LIST.map(function (e) { return { v: e[0], t: e[1] }; }), slotNow, function (v) { slotNow = Number(v); placeItemDD(); }, "slot");
+      f.appendChild(slotDD);
+      placeItemDD();
+      drawSlots();
+      fieldRow(body, "").appendChild(list);
     }
-    drawSlots();
-    fieldRow(panel, "").appendChild(list);
-    // Reminders
-    f = fieldRow(panel, "Reminders:");
-    var remList = el("div", "rems"); f.appendChild(remList);
-    function drawRems() {
-      remList.textContent = "";
-      c.rems.forEach(function (x, k) {
-        var row = el("div", "rem");
-        var t = document.createElement("input"); t.type = "text"; t.value = x.text; t.placeholder = "reminder text"; t.maxLength = 80;
-        t.oninput = function () { x.text = t.value; changed(); };
-        row.appendChild(t);
-        var cb = el("label", "cb"); var ck = document.createElement("input"); ck.type = "checkbox"; ck.checked = x.tts !== false;
-        ck.onchange = function () { x.tts = ck.checked; changed(); }; cb.appendChild(ck); cb.appendChild(document.createTextNode("TTS")); row.appendChild(cb);
-        var d = document.createElement("input"); d.type = "number"; d.min = 0; d.max = 600; d.value = x.delay || 0; d.className = "delay";
-        d.onchange = function () { var n = Math.floor(Number(d.value) || 0); if (n < 0) n = 0; if (n > 600) n = 600; d.value = n; x.delay = n; changed(); };
-        row.appendChild(d); row.appendChild(el("span", "fnote", "s late"));
-        var xx = el("span", "x", "x"); xx.title = "remove"; xx.onclick = function () { c.rems.splice(k, 1); drawRems(); changed(); }; row.appendChild(xx);
-        remList.appendChild(row);
-      });
-      var add = el("div", "rem");
-      var useOpts = [{ v: "", t: "Add: pick item..." }, { v: "dummy", t: "Target Dummy" }].concat(character.use.map(function (u) { return { v: u.id, t: (CAT_NAME[u.cat] ? CAT_NAME[u.cat] + ": " : "") + u.name }; }));
-      add.appendChild(selectEl(useOpts, "", function (v) {
-        if (!v) return;
-        if (v === "dummy") c.rems.push({ text: "Use Target Dummy", itemId: "dummy", tts: true, delay: 0 });
-        else c.rems.push({ text: "Use " + itemName(Number(v)), itemId: Number(v), tts: true, delay: 0 });
-        drawRems(); changed();
-      }));
-      var tb = el("button", "small", "+ Text"); tb.type = "button"; tb.onclick = function () { c.rems.push({ text: "", itemId: null, tts: true, delay: 0 }); drawRems(); changed(); var ins = remList.querySelectorAll("input[type=text]"); if (ins.length) ins[ins.length - 1].focus(); };
-      add.appendChild(tb);
-      add.appendChild(el("span", "fnote", "Item reminders clear when used"));
-      remList.appendChild(add);
+    function buildRems(body) {
+      var f = fieldRow(body, "Reminders:");
+      var remList = el("div", "rems"); f.appendChild(remList);
+      function drawRems() {
+        remList.textContent = "";
+        c.rems.forEach(function (x, k) {
+          var row = el("div", "rem");
+          if (x.itemId === "dummy") row.appendChild(plainIcon("inv_crate_02", x.text));
+          else if (x.itemId) row.appendChild(itemIcon(x.itemId, x.text));
+          else row.appendChild(plainIcon("inv_misc_note_01", "text"));
+          var t = document.createElement("input"); t.type = "text"; t.value = x.text; t.placeholder = "reminder text"; t.maxLength = 80;
+          t.oninput = function () { x.text = t.value; changed(); };
+          row.appendChild(t);
+          var cb = el("label", "cb"); var ck = document.createElement("input"); ck.type = "checkbox"; ck.checked = x.tts !== false;
+          ck.onchange = function () { x.tts = ck.checked; changed(); }; cb.appendChild(ck); cb.appendChild(document.createTextNode("TTS")); row.appendChild(cb);
+          var d = document.createElement("input"); d.type = "number"; d.min = 0; d.max = 600; d.value = x.delay || 0; d.className = "delay";
+          d.onchange = function () { var n = Math.floor(Number(d.value) || 0); if (n < 0) n = 0; if (n > 600) n = 600; d.value = n; x.delay = n; changed(); };
+          row.appendChild(d); row.appendChild(el("span", "fnote", "s late"));
+          var xx = el("span", "x", "x"); xx.title = "remove"; xx.onclick = function () { c.rems.splice(k, 1); drawRems(); touched(); }; row.appendChild(xx);
+          remList.appendChild(row);
+        });
+        var add = el("div", "rem");
+        var useOpts = [{ v: "", t: "Add: pick item..." }, { v: "dummy", t: "Target Dummy", icon: function () { return plainIcon("inv_crate_02", "Target Dummy"); } }]
+          .concat(character.use.map(function (u) { return itemOpt(u, (CAT_NAME[u.cat] ? CAT_NAME[u.cat] + ": " : "") + u.name); }));
+        add.appendChild(dropdown(useOpts, "", function (v, dd) {
+          if (!v) return;
+          if (v === "dummy") c.rems.push({ text: "Use Target Dummy", itemId: "dummy", tts: true, delay: 0 });
+          else c.rems.push({ text: "Use " + itemName(Number(v)), itemId: Number(v), tts: true, delay: 0 });
+          drawRems(); touched();
+        }, "use"));
+        var tb = el("button", "small", "+ Text"); tb.type = "button"; tb.onclick = function () { c.rems.push({ text: "", itemId: null, tts: true, delay: 0 }); drawRems(); touched(); var ins = remList.querySelectorAll("input[type=text]"); if (ins.length) ins[ins.length - 1].focus(); };
+        add.appendChild(tb);
+        add.appendChild(el("span", "fnote", "Item reminders clear when used"));
+        remList.appendChild(add);
+        nameItems();
+      }
+      drawRems();
     }
-    drawRems();
+    function buildBoth(body) {
+      paints.push(group(body, "gear", "Gear", gearSummary, buildGear));
+      paints.push(group(body, "rem", "Reminders", remSummary, buildRems));
+    }
+    if (title) paints.push(group(panel, field, title, function () { var a = gearSummary(), b = remSummary(); return [a, b].filter(Boolean).join(", "); }, buildBoth));
+    else buildBoth(panel);
   }
-  // the "edit" link and summary on a step, and the editor under it
   // small icons for a step row, like the in-game route list: an item as a
   // Wowhead icon link (their script fills it in and gives it a tooltip),
   // anything else as a plain icon picture
