@@ -33,6 +33,7 @@ button:disabled{opacity:.5;cursor:default}
 .raid h3{margin:0 0 4px;font-size:16px}
 .raid ol{margin:8px 0;padding-left:30px;max-height:65vh;overflow:auto;font-size:14px}
 .raid li.boss{color:var(--gold)}
+.raid li.bosspull{color:var(--gold);opacity:.85}
 .raid li .tag{margin-left:8px;padding:0 6px;border:1px solid var(--accent);color:var(--accent);font-size:12px}
 .raid .note{color:var(--accent);margin:6px 0 2px}
 .raid li .rest{color:var(--muted);font-size:13px}
@@ -974,7 +975,9 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
           if (!tm.length) return;   // nothing ticked: the pull is left out of the route
           steps.push({ type: "kills", mobs: tm, desc: (p.then && p.then.desc) || st.baseDesc, actions: actionsOf(p.then) });
         } else if (st.type === "encounter") {
-          if (hasCfg(p.pull)) steps.push({ type: "encounter", boss: st.boss, when: "start", desc: "", actions: actionsOf(p.pull) });
+          // both boss steps, like the in-game route: the targeting step
+          // ("for the boss", fires when the boss is pulled) and the kill
+          steps.push({ type: "encounter", boss: st.boss, when: "start", desc: (p.pull && p.pull.desc) || "", actions: actionsOf(p.pull) });
           st.actions = actionsOf(p.after);
           st.desc = (p.after && p.after.desc) || st.baseDesc;
           steps.push(st);
@@ -1206,36 +1209,39 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     return n;
   }
   // click the step's text to open its editor; its icons sit after the text
-  function stepEditor(li, textEl, r, i, s, restEl, offTag) {
+  // mode: "then" for a trash pull; "pull" (the targeting step, fires when
+  // the boss is pulled) or "after" (the kill) for a boss - one row each
+  function stepEditor(li, textEl, r, i, s, restEl, offTag, mode) {
+    var field = s.type === "kills" ? "then" : (mode || "after");
+    var openKey = "open_" + field;
     var pk = (picks[r.raid] || {})[i] || {};
     var icons = el("span", "icons");
     li.appendChild(icons);
-    var panel = el("div", "cfg"); panel.hidden = !pk.open;
+    var panel = el("div", "cfg"); panel.hidden = !pk[openKey];
     textEl.classList.add("clickable"); textEl.title = "Click to set this step up";
-    if (pk.open) textEl.classList.add("open");
+    if (pk[openKey]) textEl.classList.add("open");
     function refresh() {
       icons.textContent = "";
       if (!character) { applyPicks(window.__lastRoutes); return; }
-      if (s.type === "kills") iconsOf(pk.then, icons);
-      else {
-        var pull = el("span", "grp"), after = el("span", "grp");
-        var np = iconsOf(pk.pull, pull), na = iconsOf(pk.after, after);
-        if (np) { icons.appendChild(el("span", "glabel", "pull")); icons.appendChild(pull); }
-        if (na) { icons.appendChild(el("span", "glabel", "after")); icons.appendChild(after); }
-      }
+      iconsOf(pk[field], icons);
       nameItems();
       applyPicks(window.__lastRoutes);
     }
     textEl.onclick = function () {
       picks[r.raid] = picks[r.raid] || {}; pk = picks[r.raid][i] = picks[r.raid][i] || {};
-      pk.open = panel.hidden; panel.hidden = !pk.open;
-      textEl.classList.toggle("open", pk.open);
-      if (pk.open && !panel.childNodes.length) build();
+      pk[openKey] = panel.hidden; panel.hidden = !pk[openKey];
+      textEl.classList.toggle("open", pk[openKey]);
+      if (pk[openKey] && !panel.childNodes.length) build();
     };
+    function plainText() {
+      if (s.type === "kills") return mobText(trackedMobs(r, i, s)) || mobText(allMobs(s));
+      if (field === "pull") return s.boss + " - when pulled";
+      return RouteCore.stepText(s);
+    }
     function showName() {
-      var c = pk[s.type === "kills" ? "then" : "after"];
+      var c = pk[field];
       var name = (c && c.desc) || "";
-      var plain = s.type === "kills" ? (mobText(trackedMobs(r, i, s)) || mobText(allMobs(s))) : RouteCore.stepText(s);
+      var plain = plainText();
       textEl.textContent = name || plain;
       textEl.classList.toggle("named", !!name);
       textEl.title = name ? plain + " - click to set this step up" : "Click to set this step up";
@@ -1248,10 +1254,9 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
     }
     function build() {
       // the step's name (its label in the route list), like in game
-      var field = s.type === "kills" ? "then" : "after";
       var c = cfgOf(r, i, field);
       var lab = document.createElement("input"); lab.type = "text"; lab.value = c.desc; lab.maxLength = 60;
-      lab.placeholder = "optional - shown instead of " + (s.type === "kills" ? "the mob list" : "\"Kill " + s.boss + "\"");
+      lab.placeholder = "optional - shown instead of " + (s.type === "kills" ? "the mob list" : (field === "pull" ? "\"" + s.boss + "\"" : "\"Kill " + s.boss + "\""));
       lab.oninput = function () { c.desc = lab.value; showName(); refresh(); };
       fieldRow(panel, "Name:").appendChild(lab);
       if (s.type === "kills") {
@@ -1266,11 +1271,10 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
         f.appendChild(el("span", "fnote", "Untick a mob and the route stops counting it on this pull; untick all of them and the pull is left out."));
       }
       if (!character) { panel.appendChild(el("div", "fnote", "Paste your character above to pick gear sets, trinkets, items and reminders for this step.")); return; }
-      if (s.type === "kills") section(panel, r, i, "then", null, refresh);
-      else { section(panel, r, i, "pull", "When " + s.boss + " is pulled", refresh); section(panel, r, i, "after", "After the kill", refresh); }
+      section(panel, r, i, field, null, refresh);
     }
     pk = picks[r.raid] && picks[r.raid][i] || {};
-    if (pk.open) build();
+    if (pk[openKey]) build();
     li.appendChild(panel);
     showName();
     refresh();
@@ -1333,13 +1337,17 @@ var RELAY_URL = "https://readycheck-routes.zacharymharris2.workers.dev";
       box.appendChild(raidMobs(r));
       var ol = document.createElement("ol");
       r.steps.forEach(function (s, i) {
-        var li = document.createElement("li"); var textEl = el("span", "steptext", RouteCore.stepText(s)); li.appendChild(textEl);
-        if (s.type === "encounter") li.className = "boss";
-        if (s.split) { var tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "split"; li.appendChild(tag); }
-        var offTag = el("span", "tag off", "left out"); offTag.title = "No mob of this pull is ticked, so it is not in the route"; offTag.hidden = true; li.appendChild(offTag);
-        var rest = el("span", "rest", ""); li.appendChild(rest);
-        stepEditor(li, textEl, r, i, s, rest, offTag);
-        ol.appendChild(li);
+        // a boss is two rows, as in game: the targeting step and the kill
+        var modes = s.type === "encounter" ? ["pull", "after"] : ["then"];
+        modes.forEach(function (mode) {
+          var li = document.createElement("li"); var textEl = el("span", "steptext", RouteCore.stepText(s)); li.appendChild(textEl);
+          if (s.type === "encounter") li.className = "boss" + (mode === "pull" ? " bosspull" : "");
+          if (s.split && mode === "then") { var tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "split"; li.appendChild(tag); }
+          var offTag = el("span", "tag off", "left out"); offTag.title = "No mob of this pull is ticked, so it is not in the route"; offTag.hidden = true; li.appendChild(offTag);
+          var rest = el("span", "rest", ""); li.appendChild(rest);
+          stepEditor(li, textEl, r, i, s, rest, offTag, mode);
+          ol.appendChild(li);
+        });
       });
       box.appendChild(ol);
       var b = document.createElement("button"); b.className = "go"; b.textContent = "Copy " + r.raid + " route";
